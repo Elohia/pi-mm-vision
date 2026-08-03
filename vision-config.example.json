@@ -1,0 +1,9 @@
+{
+  "model": "qwen-vl-max",
+  "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "maxTokens": 2048,
+  "autoDetect": true,
+  "mode": "auto",
+  "cacheTTL": 600,
+  "cacheMax": 100
+}
