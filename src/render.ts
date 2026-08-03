@@ -116,10 +116,26 @@ export function asciiMatrixToPixels(ascii: string): { width: number; height: num
   const cells: { x: number; y: number; gray: number }[] = [];
   // 灰度字符表（亮→暗）：' ' 0, '.' 1, ':' 2, '-' 3, '=' 4, '+' 5, '*' 6, '#' 7, '%' 8, '@' 9
   const ramp: Record<string, number> = { " ": 0, ".": 1, ":": 2, "-": 3, "=": 4, "+": 5, "*": 6, "#": 7, "%": 8, "@": 9 };
+
+  // 自动检测 invert：统计最暗字符(@)与最亮字符(空格)占比
+  // ascii_dot invert=1（暗背景）: @=背景(暗)，空格=前景(亮)，@ 占多数 → 翻转
+  // ascii_dot invert=0（亮背景）: 空格=背景(亮)，@=前景(暗)，空格占多数 → 不翻转
+  let darkCount = 0, lightCount = 0, total = 0;
+  for (const line of lines) {
+    for (const ch of line) {
+      if (ch === "@" || ch === "%" || ch === "#") darkCount++;
+      if (ch === " " || ch === "." || ch === ":") lightCount++;
+      total++;
+    }
+  }
+  // 暗字符(含@%#)占多数 → 暗背景 invert=1 → 翻转（@→0 背景，空格→9 前景）
+  const inverted = total > 0 && darkCount > total * 0.5;
+
   lines.forEach((line, y) => {
     for (let x = 0; x < line.length; x++) {
       const ch = line[x];
-      const g = ramp[ch] ?? 9;
+      let g = ramp[ch] ?? (ch === " " ? 0 : 9);
+      if (inverted) g = 9 - g; // 翻转：@→0(暗背景)，空格→9(亮前景)
       if (g > 0) cells.push({ x, y, gray: g / 9 });
     }
   });
@@ -159,6 +175,209 @@ export function pixelsToSVG(
   return parts.join("\n");
 }
 
+/** 提取 RGB 色块矩阵：每行格式 "R,G,B R,G,B ..."（空格分隔，逗号分隔通道） */
+export function parseRGBMatrix(text: string): { width: number; height: number; cells: { x: number; y: number; r: number; g: number; b: number }[] } | null {
+  // 支持分块：识别 # TILE tx,ty 头，按块偏移拼接（RGB 真彩色分块）
+  const rawLines = text.split(/\r?\n/);
+  const cells: { x: number; y: number; r: number; g: number; b: number }[] = [];
+  let width = 0, height = 0;
+  let tileOx = 0, tileOy = 0, tileW = 0, tileH = 0, curRow = 0;
+
+  for (const rawLine of rawLines) {
+    const line = rawLine.trim();
+    const tileHead = line.match(/^#\s*TILE\s*(\d+),(\d+)/);
+    if (tileHead) {
+      const tx = parseInt(tileHead[1]), ty = parseInt(tileHead[2]);
+      // 块尺寸取上一块的行数/列数，偏移累加
+      tileOx = tx * Math.max(tileW, 1);
+      tileOy = ty * Math.max(tileH, 1);
+      curRow = 0;
+      continue;
+    }
+    if (!line.includes(",") || !/^[\d,\s]+$/.test(line)) continue;
+    const parts = line.split(/\s+/);
+    const y = tileOy + curRow;
+    let x = tileOx;
+    let found = 0;
+    for (const part of parts) {
+      const m = part.match(/^(\d{1,3}),(\d{1,3}),(\d{1,3})$/);
+      if (m) {
+        cells.push({ x, y, r: parseInt(m[1]), g: parseInt(m[2]), b: parseInt(m[3]) });
+        found++;
+        x++;
+      }
+    }
+    if (found > 0) {
+      if (tileW === 0 || found > tileW) tileW = found;
+      curRow++;
+      if (y + 1 > height) height = y + 1;
+      if (tileOx + found > width) width = tileOx + found;
+      if (curRow > tileH) tileH = curRow;
+    }
+  }
+  if (cells.length === 0) return null;
+  return { width, height, cells };
+}
+
+/** RGB 色块 → 密集 SVG（同色横向合并 run-length，避免 rect 爆炸） */
+export function pixelsToSVGRGB(
+  matrix: { width: number; height: number; cells: { x: number; y: number; r: number; g: number; b: number }[] },
+  opts: { pixelSize?: number; bg?: string } = {},
+): string {
+  const pixelSize = opts.pixelSize ?? 6;
+  const W = matrix.width * pixelSize;
+  const H = matrix.height * pixelSize;
+  const bg = opts.bg ?? "#0d1117";
+  const parts: string[] = [];
+  parts.push(`<svg ${SVG_NS} width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
+  parts.push(`<rect width="${W}" height="${H}" fill="${bg}"/>`);
+  // 按行分组，行内同色合并
+  const byRow = new Map<number, typeof matrix.cells>();
+  for (const c of matrix.cells) {
+    if (!byRow.has(c.y)) byRow.set(c.y, []);
+    byRow.get(c.y)!.push(c);
+  }
+  for (const [y, row] of byRow) {
+    row.sort((a, b) => a.x - b.x);
+    let i = 0;
+    while (i < row.length) {
+      const c = row[i];
+      const key = `${c.r},${c.g},${c.b}`;
+      let j = i + 1;
+      while (j < row.length && `${row[j].r},${row[j].g},${row[j].b}` === key && row[j].x === row[j - 1].x + 1) j++;
+      const run = j - i;
+      const col = `#${c.r.toString(16).padStart(2, "0")}${c.g.toString(16).padStart(2, "0")}${c.b.toString(16).padStart(2, "0")}`;
+      parts.push(`<rect x="${c.x * pixelSize}" y="${y * pixelSize}" width="${run * pixelSize}" height="${pixelSize}" fill="${col}"/>`);
+      i = j;
+    }
+  }
+  parts.push(`</svg>`);
+  return parts.join("\n");
+}
+
+/** 从编码文本提取 RGB 色块段（【色块】或 RGB 矩阵块） */
+export function extractRGBMatrix(text: string): string | null {
+  // 【色块】段
+  const m = text.match(/【[^】]*色块[^】]*】[\s\S]*?(?=【|$)/);
+  if (m) {
+    const body = m[0].replace(/【[^】]*】/, "");
+    const parsed = parseRGBMatrix(body);
+    if (parsed) return body;
+  }
+  // 直接 RGB 矩阵（多行 R,G,B 空格分隔）
+  const parsed = parseRGBMatrix(text);
+  if (parsed && parsed.cells.length > 20) return text;
+  return null;
+}
+
+/**
+ * 分块点阵解析：# TILE x,y 头 + 数据行 → 带偏移的像素网格
+ * 支持 4×4、8×8 等任意分块，组合成大图
+ */
+export interface TiledMatrix {
+  width: number;      // 总宽（点阵格数）
+  height: number;     // 总高
+  cells: { x: number; y: number; gray: number }[];
+  tileW: number;      // 每块宽
+  tileH: number;      // 每块高
+  tilesX: number;
+  tilesY: number;
+}
+
+export function parseTiledMatrix(text: string): TiledMatrix | null {
+  const lines = text.split(/\r?\n/);
+  const tiles: { tx: number; ty: number; lines: string[] }[] = [];
+  let current: { tx: number; ty: number; lines: string[] } | null = null;
+  let tileW = 0, tileH = 0, tilesX = 0, tilesY = 0;
+  let maxX = 0, maxY = 0;
+
+  for (const line of lines) {
+    const tileHead = line.match(/^#\s*TILE\s*(\d+),(\d+)\s*size=(\d+)x(\d+)/);
+    if (tileHead) {
+      if (current) tiles.push(current);
+      const tx = parseInt(tileHead[1]), ty = parseInt(tileHead[2]);
+      tileW = parseInt(tileHead[3]); tileH = parseInt(tileHead[4]);
+      tilesX = Math.max(tilesX, tx + 1);
+      tilesY = Math.max(tilesY, ty + 1);
+      current = { tx, ty, lines: [] };
+      continue;
+    }
+    if (current && line.trim() && !line.startsWith("#")) {
+      current.lines.push(line);
+    }
+  }
+  if (current) tiles.push(current);
+  if (tiles.length < 2) return null;
+
+  const ramp: Record<string, number> = { " ": 0, ".": 1, ":": 2, "-": 3, "=": 4, "+": 5, "*": 6, "#": 7, "%": 8, "@": 9 };
+  const cells: { x: number; y: number; gray: number }[] = [];
+
+  // 全图统一 invert：统计所有块的字符分布，避免分块接缝明暗跳变
+  let darkTotal = 0, allTotal = 0;
+  for (const tile of tiles) {
+    for (const l of tile.lines) for (const ch of l) {
+      if ("@%#*".includes(ch)) darkTotal++;
+      allTotal++;
+    }
+  }
+  const inverted = allTotal > 0 && darkTotal > allTotal * 0.5;
+
+  for (const tile of tiles) {
+    const ox = tile.tx * tileW, oy = tile.ty * tileH;
+    tile.lines.forEach((line, y) => {
+      for (let x = 0; x < line.length; x++) {
+        const ch = line[x];
+        let g = ramp[ch] ?? (ch === " " ? 0 : 9);
+        if (inverted) g = 9 - g;
+        if (g > 0) cells.push({ x: ox + x, y: oy + y, gray: g / 9 });
+      }
+    });
+    maxX = Math.max(maxX, ox + tileW);
+    maxY = Math.max(maxY, oy + tileH);
+  }
+
+  return { width: maxX, height: maxY, cells, tileW, tileH, tilesX, tilesY };
+}
+
+export function tiledToSVG(matrix: TiledMatrix, opts: { pixelSize?: number; bg?: string; fg?: string } = {}): string {
+  const pixelSize = opts.pixelSize ?? 4;
+  const W = matrix.width * pixelSize;
+  const H = matrix.height * pixelSize;
+  const bg = opts.bg ?? "#0d1117";
+  const fg = opts.fg ?? "#39d353";
+  const parts: string[] = [];
+  parts.push(`<svg ${SVG_NS} width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
+  parts.push(`<rect width="${W}" height="${H}" fill="${bg}"/>`);
+
+  const byRow = new Map<number, typeof matrix.cells>();
+  for (const c of matrix.cells) {
+    if (!byRow.has(c.y)) byRow.set(c.y, []);
+    byRow.get(c.y)!.push(c);
+  }
+  const fgr = parseInt(fg.slice(1, 3), 16), fgg = parseInt(fg.slice(3, 5), 16), fgb = parseInt(fg.slice(5, 7), 16);
+  const bgr = parseInt(bg.slice(1, 3), 16), bgg = parseInt(bg.slice(3, 5), 16), bgb = parseInt(bg.slice(5, 7), 16);
+  const mix = (a: number, b: number, t: number) => Math.round(a + (b - a) * t);
+
+  for (const [y, row] of byRow) {
+    row.sort((a, b) => a.x - b.x);
+    let i = 0;
+    while (i < row.length) {
+      const c = row[i];
+      const key = c.gray;
+      let j = i + 1;
+      while (j < row.length && row[j].gray === key && row[j].x === row[j - 1].x + 1) j++;
+      const run = j - i;
+      const r = mix(bgr, fgr, c.gray).toString(16).padStart(2, "0");
+      const g = mix(bgg, fgg, c.gray).toString(16).padStart(2, "0");
+      const b = mix(bgb, fgb, c.gray).toString(16).padStart(2, "0");
+      parts.push(`<rect x="${c.x * pixelSize}" y="${y * pixelSize}" width="${run * pixelSize}" height="${pixelSize}" fill="#${r}${g}${b}"/>`);
+      i = j;
+    }
+  }
+  parts.push(`</svg>`);
+  return parts.join("\n");
+}
+
 /** 从编码文本提取 ASCII 点阵块（```围栏或【点阵】段） */
 export function extractAsciiMatrix(text: string): string | null {
   // 1) ``` 代码围栏
@@ -168,6 +387,20 @@ export function extractAsciiMatrix(text: string): string | null {
   // 2) 【点阵】段
   const m = text.match(/【[^】]*点阵[^】]*】[\s\S]*?```[^\n]*\n([\s\S]*?)```/);
   if (m) return m[1];
+  // 3) 裸点阵文件（ascii_dot.py 输出）：标尺行 + 分隔行 + 数据行
+  const lines = text.split(/\r?\n/);
+  const dataStart = lines.findIndex((l) => /^\d+\|/.test(l) || /^\s*\|/.test(l));
+  if (dataStart >= 0) {
+    const data = lines.slice(dataStart).filter((l) => /[|]/.test(l) || /^[-=]+$/.test(l));
+    if (data.length >= 3 && data.some((l) => l.includes("@") || l.includes("#") || l.includes("*"))) {
+      // 去掉行标（如 0| 1| 和纯分隔行），保留点阵主体
+      const body = data
+        .filter((l) => /[|]/.test(l))
+        .map((l) => l.replace(/^\s*\d*\|/, ""))
+        .join("\n");
+      if (body.trim()) return body;
+    }
+  }
   return null;
 }
 
@@ -419,7 +652,19 @@ function randSeeded(seed: number): () => number {
 export function renderSynesthesiaToSVG(synesthesia: string, width = 960): string {
   const lines = synesthesia.split("\n").map((l) => l.trim()).filter(Boolean);
 
-  // ════════ 像素级模式：存在 ASCII 点阵块 → 直接渲染为像素网格 ════════
+  // ════════ 像素级模式：分块点阵 → RGB 色块 → ASCII 点阵 ════════
+  const tiled = parseTiledMatrix(synesthesia);
+  if (tiled) {
+    // 分块组合渲染：总宽由 width 决定，每格像素 = width / 总列数
+    const pixelSize = Math.max(1, Math.floor(width / tiled.width));
+    return tiledToSVG(tiled, { pixelSize, bg: "#0d1117", fg: "#39d353" });
+  }
+  const rgbText = extractRGBMatrix(synesthesia);
+  if (rgbText) {
+    const matrix = parseRGBMatrix(rgbText)!;
+    const pixelSize = Math.max(1, Math.floor(width / matrix.width));
+    return pixelsToSVGRGB(matrix, { pixelSize });
+  }
   const asciiMatrix = extractAsciiMatrix(synesthesia);
   if (asciiMatrix) {
     const matrix = asciiMatrixToPixels(asciiMatrix);
@@ -621,4 +866,193 @@ export function renderSynesthesiaToSVGFile(synesthesia: string, outPath: string,
 export function synesthesiaToDataURL(synesthesia: string, width = 960): string {
   const svg = renderSynesthesiaToSVG(synesthesia, width);
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
+
+
+// ==================== HTML 渲染器（canvas 真彩色，浏览器零依赖） ====================
+
+/**
+ * 像素矩阵 → HTML 页面（canvas + putImageData 渲染）
+ * 浏览器打开即得图片，支持缩放/右键保存 PNG
+ */
+export function pixelsToHTML(
+  cells: { x: number; y: number; gray: number }[],
+  opts: { width: number; height: number; bg?: string; fg?: string; scale?: number; title?: string },
+): string {
+  const scale = opts.scale ?? 8;
+  const W = opts.width, H = opts.height;
+  const bg = opts.bg ?? "#0d1117";
+  const fg = opts.fg ?? "#39d353";
+  const title = opts.title ?? "mm-vision 渲染";
+
+  // 构建像素数据：JSON 数组 [x,y,gray]
+  const data = JSON.stringify(cells.map((c) => [c.x, c.y, c.gray]));
+  return `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>${title}</title>
+<style>
+  body { margin: 0; background: #111; display: flex; flex-direction: column; align-items: center; padding: 16px; font-family: monospace; }
+  #wrap { background: #000; display: inline-block; border: 1px solid #333; }
+  canvas { display: block; image-rendering: pixelated; }
+  .bar { color: #888; font-size: 12px; margin: 8px 0; }
+  button { background: #1d4ed8; color: #fff; border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #2563eb; }
+</style>
+</head>
+<body>
+  <div class="bar">${title} — ${W}×${H} 像素 × ${scale} 缩放（点击保存 PNG）</div>
+  <div id="wrap"><canvas id="cv" width="${W}" height="${H}"></canvas></div>
+  <div class="bar"><button onclick="save()">💾 保存 PNG</button></div>
+<script>
+const W = ${W}, H = ${H}, scale = ${scale};
+const fgHex = "${fg}", bgHex = "${bg}";
+const fg = [parseInt(fgHex.slice(1,3),16), parseInt(fgHex.slice(3,5),16), parseInt(fgHex.slice(5,7),16)];
+const bg = [parseInt(bgHex.slice(1,3),16), parseInt(bgHex.slice(3,5),16), parseInt(bgHex.slice(5,7),16)];
+const mix = (a,b,t) => Math.round(a + (b-a)*t);
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const img = ctx.createImageData(W, H);
+// 背景
+for (let i = 0; i < W*H; i++) { img.data[i*4] = bg[0]; img.data[i*4+1] = bg[1]; img.data[i*4+2] = bg[2]; img.data[i*4+3] = 255; }
+// 像素
+const cells = ${data};
+for (const [x, y, g] of cells) {
+  const i = (y*W + x) * 4;
+  img.data[i] = mix(bg[0], fg[0], g);
+  img.data[i+1] = mix(bg[1], fg[1], g);
+  img.data[i+2] = mix(bg[2], fg[2], g);
+  img.data[i+3] = 255;
+}
+ctx.putImageData(img, 0, 0);
+// 缩放显示
+cv.style.width = (W*scale) + "px";
+cv.style.height = (H*scale) + "px";
+function save() {
+  const out = document.createElement("canvas");
+  out.width = W*scale; out.height = H*scale;
+  const octx = out.getContext("2d");
+  octx.imageSmoothingEnabled = false;
+  octx.drawImage(cv, 0, 0, out.width, out.height);
+  out.toBlob(b => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b);
+    a.download = "mm-vision-${Date.now()}.png";
+    a.click();
+  });
+}
+</script>
+</body>
+</html>`;
+}
+
+/** RGB 三元组矩阵 → HTML（真彩色 canvas） */
+export function rgbToHTML(
+  cells: { x: number; y: number; r: number; g: number; b: number }[],
+  opts: { width: number; height: number; bg?: string; scale?: number; title?: string },
+): string {
+  const scale = opts.scale ?? 4;
+  const W = opts.width, H = opts.height;
+  const title = opts.title ?? "mm-vision RGB 渲染";
+  const data = JSON.stringify(cells.map((c) => [c.x, c.y, c.r, c.g, c.b]));
+  return `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>${title}</title>
+<style>
+  body { margin: 0; background: #111; display: flex; flex-direction: column; align-items: center; padding: 16px; font-family: monospace; }
+  canvas { display: block; image-rendering: pixelated; border: 1px solid #333; }
+  .bar { color: #888; font-size: 12px; margin: 8px 0; }
+  button { background: #1d4ed8; color: #fff; border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+</style>
+</head>
+<body>
+  <div class="bar">${title} — ${W}×${H} 像素真彩色（点击保存 PNG）</div>
+  <canvas id="cv" width="${W}" height="${H}"></canvas>
+  <div class="bar"><button onclick="save()">💾 保存 PNG</button></div>
+<script>
+const W = ${W}, H = ${H}, scale = ${scale};
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const img = ctx.createImageData(W, H);
+const cells = ${data};
+for (const [x, y, r, g, b] of cells) {
+  const i = (y*W + x) * 4;
+  img.data[i] = r; img.data[i+1] = g; img.data[i+2] = b; img.data[i+3] = 255;
+}
+ctx.putImageData(img, 0, 0);
+cv.style.width = (W*scale) + "px";
+cv.style.height = (H*scale) + "px";
+function save() {
+  const out = document.createElement("canvas");
+  out.width = W*scale; out.height = H*scale;
+  const octx = out.getContext("2d");
+  octx.imageSmoothingEnabled = false;
+  octx.drawImage(cv, 0, 0, out.width, out.height);
+  out.toBlob(b => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b);
+    a.download = "mm-vision-rgb-${Date.now()}.png";
+    a.click();
+  });
+}
+</script>
+</body>
+</html>`;
+}
+
+/**
+ * RGB 三层嵌套解析：三组点阵分别编码 R/G/B 通道
+ * 格式：【R通道】点阵... 【G通道】点阵... 【B通道】点阵...
+ * 每通道字符 0-9 级灰度 → 组合成真彩色像素
+ */
+export function parseRGBChannels(text: string): { width: number; height: number; cells: { x: number; y: number; r: number; g: number; b: number }[] } | null {
+  const channelRegex = /【\s*([RrGgBb])\s*通道[^】]*】\s*([\s\S]*?)(?=【|$)/g;
+  const channels: Record<string, string> = {};
+  let m: RegExpExecArray | null;
+  while ((m = channelRegex.exec(text)) !== null) {
+    const ch = m[1].toUpperCase();
+    channels[ch] = m[2];
+  }
+  if (!channels.R || !channels.G || !channels.B) return null;
+
+  const ramp: Record<string, number> = { " ": 0, ".": 1, ":": 2, "-": 3, "=": 4, "+": 5, "*": 6, "#": 7, "%": 8, "@": 9 };
+  const parseChan = (raw: string): { width: number; height: number; vals: Map<string, number> } => {
+    const lines = raw.split(/\r?\n/).map((l) => l.replace(/\r$/, "")).filter((l) => l.trim().length > 0);
+    const vals = new Map<string, number>();
+    let width = 0;
+    let realHeight = 0;
+    lines.forEach((line) => {
+      // 去行首空格 + 去行标（如 0| 或 0|）
+      const clean = line.replace(/^\s*/, "").replace(/^\d*\|/, "");
+      // 只统计点阵字符行（含 10 级字符），跳过标尺/分隔行
+      if (!/^[-=]+$/.test(clean) && !/^[\d\s]+$/.test(clean)) {
+        const y = realHeight;
+        for (let x = 0; x < clean.length; x++) {
+          const g = ramp[clean[x]] ?? (clean[x] === " " ? 0 : 9);
+          vals.set(`${x},${y}`, g / 9);
+          if (x + 1 > width) width = x + 1;
+        }
+        realHeight++;
+      }
+    });
+    return { width, height: realHeight, vals };
+  };
+
+  const R = parseChan(channels.R), G = parseChan(channels.G), B = parseChan(channels.B);
+  const width = Math.max(R.width, G.width, B.width);
+  const height = Math.max(R.height, G.height, B.height);
+  const cells: { x: number; y: number; r: number; g: number; b: number }[] = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const key = `${x},${y}`;
+      const r = Math.round((R.vals.get(key) ?? 0) * 255);
+      const g = Math.round((G.vals.get(key) ?? 0) * 255);
+      const b = Math.round((B.vals.get(key) ?? 0) * 255);
+      if (r > 4 || g > 4 || b > 4) cells.push({ x, y, r, g, b });
+    }
+  }
+  return { width, height, cells };
 }

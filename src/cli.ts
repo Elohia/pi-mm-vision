@@ -16,7 +16,7 @@
  *   mm-vision analyze F:/charts/kline.png coords "只输出坐标"
  */
 import { analyzeImage, loadConfig, cacheStats, configCandidates, packageRoot } from "./core.js";
-import { renderSynesthesiaToSVG, renderSynesthesiaToSVGFile, extractAsciiMatrix, asciiMatrixToPixels, pixelsToSVG } from "./render.js";
+import { renderSynesthesiaToSVG, renderSynesthesiaToSVGFile, extractAsciiMatrix, asciiMatrixToPixels, pixelsToSVG, pixelsToHTML, rgbToHTML, parseRGBMatrix, parseRGBChannels, parseTiledMatrix, tiledToSVG } from "./render.js";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -97,6 +97,58 @@ async function main() {
       const svg = pixelsToSVG(m, { pixelSize, fg, bg });
       fs.writeFileSync(outPath, svg, "utf-8");
       console.log(`✅ 像素网格已渲染: ${path.resolve(outPath)} (${m.width}x${m.height}, ${m.cells.length} 像素, ${svg.length} bytes)`);
+      return;
+    }
+
+    case "html": {
+      // 文字 → HTML 图片页（浏览器 canvas 渲染）
+      const src = args[1];
+      if (!src) {
+        console.error("用法: mm-vision html <点阵或RGB矩阵文件> [-o out.html] [--scale 8] [--fg #39d353] [--bg #0d1117]");
+        console.error("支持: ASCII点阵 / R,G,B 三元组矩阵 / 【R通道】三层嵌套");
+        process.exit(2);
+      }
+      let outPath = "out.html";
+      let scale = 8, fg = "#39d353", bg = "#0d1117";
+      const rest = args.slice(2);
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === "-o" && rest[i + 1]) outPath = rest[i + 1];
+        if (rest[i] === "--scale" && rest[i + 1]) scale = parseInt(rest[i + 1]);
+        if (rest[i] === "--fg" && rest[i + 1]) fg = rest[i + 1];
+        if (rest[i] === "--bg" && rest[i + 1]) bg = rest[i + 1];
+      }
+      const text = fs.readFileSync(src, "utf-8");
+
+      // 1) RGB 三元组矩阵
+      const rgb = parseRGBMatrix(text);
+      if (rgb) {
+        const html = rgbToHTML(rgb.cells, { width: rgb.width, height: rgb.height, scale, title: "mm-vision RGB" });
+        fs.writeFileSync(outPath, html, "utf-8");
+        console.log(`✅ HTML 已生成: ${path.resolve(outPath)} (RGB ${rgb.width}x${rgb.height} 真彩色，浏览器打开即见图)`);
+        return;
+      }
+      // 2) RGB 三层嵌套（【R通道】点阵...）
+      const rgbc = parseRGBChannels(text);
+      if (rgbc) {
+        const html = rgbToHTML(rgbc.cells, { width: rgbc.width, height: rgbc.height, scale, title: "mm-vision RGB-3通道" });
+        fs.writeFileSync(outPath, html, "utf-8");
+        console.log(`✅ HTML 已生成: ${path.resolve(outPath)} (三通道 ${rgbc.width}x${rgbc.height} 真彩色)`);
+        return;
+      }
+      // 3) 分块点阵
+      const tiled = parseTiledMatrix(text);
+      if (tiled) {
+        const html = pixelsToHTML(tiled.cells, { width: tiled.width, height: tiled.height, fg, bg, scale, title: "mm-vision 分块点阵" });
+        fs.writeFileSync(outPath, html, "utf-8");
+        console.log(`✅ HTML 已生成: ${path.resolve(outPath)} (分块 ${tiled.width}x${tiled.height}，${tiled.cells.length} 像素)`);
+        return;
+      }
+      // 4) 普通 ASCII 点阵
+      const matrix = extractAsciiMatrix(text) || text;
+      const m = asciiMatrixToPixels(matrix);
+      const html = pixelsToHTML(m.cells, { width: m.width, height: m.height, fg, bg, scale, title: "mm-vision 点阵" });
+      fs.writeFileSync(outPath, html, "utf-8");
+      console.log(`✅ HTML 已生成: ${path.resolve(outPath)} (${m.width}x${m.height}，${m.cells.length} 像素)`);
       return;
     }
 

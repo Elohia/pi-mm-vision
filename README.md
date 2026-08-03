@@ -26,7 +26,8 @@
 - 🔌 **零硬编码**：模型 / baseUrl / API key / 配置路径全可配置；兼容任意 OpenAI 兼容视觉模型（qwen-vl / gpt-4o / glm-4v / kimi-vl / MiniMax-VL…）
 - 🖥️ **多宿主接入**：MCP（Claude Code / Codex / Pi / Cursor / opencode）+ CLI + Agent 扩展
 - 🎨 **双向协议（mcp_render）**：通感编码 → SVG 图片（矩形/圆/椭圆/多边形/箭头/文本/K线），纯文本 LLM 获得**画图**能力
-- 🔬 **像素级渲染**：ASCII 点阵 → 像素网格 SVG（点→线→面链路），纯文本模型输出点阵即可生成像素级图片
+- 🔬 **像素级渲染**：ASCII 点阵 / RGB三元组 / RGB三通道嵌套 → 像素网格，分块拼接（4×4=5万+像素），**文字→真彩色图片**
+- 🌐 **HTML 渲染器**：canvas putImageData 浏览器直接出图（零依赖、可缩放、一键保存 PNG）
 
 ## 🚀 安装（3 分钟）
 
@@ -123,6 +124,7 @@ CLI 反向渲染：
 ```bash
 mm-vision render encoded.txt -o chart.svg      # 通感编码文本 → SVG
 mm-vision pixels smile.txt -o smile.svg        # ASCII 点阵 → 像素网格 SVG（像素级）
+mm-vision html lake.txt -o lake.html --scale 4    # 点阵/RGB → HTML 画布页（浏览器出图）
 # 再用 scripts/svg2png.py 转 PNG
 ```
 
