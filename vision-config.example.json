@@ -5,5 +5,9 @@
   "autoDetect": true,
   "mode": "auto",
   "cacheTTL": 600,
-  "cacheMax": 100
+  "cacheMax": 100,
+  "dotMatrix": false,
+  "dotWidth": 80,
+  "dotHeight": 24,
+  "dotInvert": true
 }

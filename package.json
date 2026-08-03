@@ -1,0 +1,51 @@
+{
+  "name": "mm-vision",
+  "version": "2.0.0",
+  "description": "Synesthesia Encoder (通感编码器) — give any text-only LLM the ability to see images via structured spatial text encoding. Works with Pi / Codex / Claude Code / any MCP host.",
+  "type": "module",
+  "bin": {
+    "mm-vision": "./dist/cli.js"
+  },
+  "main": "./dist/core.js",
+  "exports": {
+    ".": "./dist/core.js",
+    "./core": "./dist/core.js",
+    "./mcp-server": "./dist/mcp-server.js",
+    "./cli": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "mcp": "tsx src/mcp-server.ts",
+    "cli": "tsx src/cli.ts"
+  },
+  "files": [
+    "dist",
+    "scripts",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "vision",
+    "multimodal",
+    "mcp",
+    "synesthesia",
+    "kline",
+    "chart",
+    "deepseek",
+    "pi-agent",
+    "codex",
+    "claude-code"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

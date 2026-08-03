@@ -1,46 +1,85 @@
-# mm-vision
+# mm-vision — Synesthesia Encoder (通感编码器)
 
-**Synesthesia Encoder** — give any text-only LLM (DeepSeek, etc.) the ability to "see" images via structured spatial text encoding.
+**Give any text-only LLM (DeepSeek, GPT-4 base, Claude…) the ability to "see" images.**
 
-通感编码器 — 让纯文本模型（DeepSeek 等）通过"通感编码"获得图片的空间认知：视觉模型看原图 → 输出结构化文字（画布/元素/百分比坐标/形状/数值/关系）→ 注入给文本模型，后者凭文字重建画面。
+通感编码器 — 让纯文本模型通过**结构化空间文字**获得像素级图片认知：视觉模型看原图 → 输出紧凑的坐标化描述（画布/元素/百分比坐标/形状/数值/关系）→ 注入给文本模型，后者凭文字重建画面、推理位置关系。
 
-## Why 通感编码 (Synesthesia)?
+![example](examples/kline.png)
 
-Text-only models cannot process image tokens. Two naive fixes fail:
+## Why 通感编码?
 
-| Approach | Problem |
-|----------|---------|
-| Dot-matrix (ASCII art) | Slow (spawns external processes), token-heavy (~1200+ tokens), loses color/semantics |
-| Plain vision description | Vague prose: model knows "a K-line chart" but not *where* the peak is, *where* support is, *how steep* the trend is |
+纯文本模型无法处理图片 token。两种朴素方案都有硬伤：
 
-Synesthesia encoding is a middle path: **one API call**, the vision model translates the image into a **compact, coordinate-based spatial description** (like a pilot describing terrain by coordinates). The text model reconstructs the scene and can reason about positions with pixel-level precision.
+| 方案 | 问题 |
+|------|------|
+| ASCII 点阵 | 慢（外部进程）、token 爆炸（1200+）、丢失颜色/语义 |
+| 自然语言描述 | 模糊散文：模型知道"是K线图"但不知道**峰在哪、支撑在哪、趋势多陡** |
 
-## Features
+通感编码走中间路线：**一次 API 调用**，视觉模型把图片翻译成**紧凑的坐标化空间描述**（像飞行员按坐标报告地形），文本模型据此重建场景，位置推理精确到像素级。
 
-- 🎯 **Synesthesia encoding**: structured spatial description (canvas / elements / (x%, y%) coordinates / shapes / values / relationships)
-- 🔢 **Optional dot-matrix mode** (`dotMatrix: true`): appends a pixel-level ASCII dot-matrix (with grid rulers) for shape-precision use cases — off by default to save tokens/time
-- ⚡ **3 modes + auto**: `brief` (fast & cheap, 512 tokens) / `full` (standard) / `coords` (coordinate-first, for charts & screenshots) / `auto` (auto-detects charts via keywords → coords)
-- 🧠 **Cache**: same image re-analysis within TTL returns instantly (default 600s, 100 entries)
-- 🔌 **Zero hardcoding**: model / baseUrl / API key / config path all configurable; works with any OpenAI-compatible vision model (qwen-vl, gpt-4o, glm-4v, kimi-vl, MiniMax-VL…)
-- 🖼️ **3 entry points**: `mm_vision` tool (agent-invoked), paste-image auto-detection (input event), `/vision` command (interactive)
+## ✨ Features
 
-## Install
+- 🎯 **通感编码**：画布 / 元素 / (x%, y%) 坐标 / 形状 / 数值 / 关系，结构化输出
+- 🔢 **可选点阵模式**（`dotMatrix: true`）：追加像素级 ASCII 点阵（带网格标尺），适合曲线细节场景
+- ⚡ **4 种模式**：`brief`（快/省 512 tokens）/ `full`（标准）/ `coords`（坐标优先，图表盘面专用）/ `auto`（关键词自动识别）
+- 🧠 **缓存**：TTL 内重复分析秒回（默认 600s / 100 条）
+- 🔌 **零硬编码**：模型 / baseUrl / API key / 配置路径全可配置；兼容任意 OpenAI 兼容视觉模型（qwen-vl / gpt-4o / glm-4v / kimi-vl / MiniMax-VL…）
+- 🖥️ **多宿主接入**：MCP（Claude Code / Codex / Pi / Cursor / opencode）+ CLI + Agent 扩展
 
-1. Copy `mm-vision.ts` into your Pi extensions directory (e.g. `~/.pi/extensions/` or `F:/pi-agent/extensions/`).
-2. Configure API key (see below).
-3. Restart Pi. No npm dependencies — uses only the Pi ExtensionAPI and Node built-ins (`fetch`, `fs`, `os`, `path`, `crypto`).
+## 🚀 安装（3 分钟）
 
-## Configuration
+### 方式 A：一键脚本（推荐）
 
-Config file is looked up in order (first found wins):
+```bash
+git clone https://github.com/Elohia/pi-mm-vision.git
+cd pi-mm-vision
+./install.sh          # 构建 + 自动注册到 Claude Code / Codex / Pi
+```
 
-1. `MM_VISION_CONFIG` env var
-2. `~/.pi/vision-config.json`
-3. `~/.config/mm-vision/config.json`
-4. `<cwd>/vision-config.json`
-5. `<cwd>/.vision-config.json`
+### 方式 B：手动
 
-Example `vision-config.json`:
+```bash
+npm install && npm run build
+```
+
+然后按你的 Agent 注册：
+
+| Agent | 注册命令 |
+|-------|----------|
+| **Claude Code** | `claude mcp add mm-vision -- node $(pwd)/dist/mcp-server.js` |
+| **Codex** | `codex mcp add mm-vision -- node $(pwd)/dist/mcp-server.js` |
+| **Pi** | 在 `~/.agents/mcp/mcp.json` 加条目（Pi 网关自动导入） |
+| **任何 MCP 宿主** | 以 stdio 方式指向 `dist/mcp-server.js` |
+| **无 MCP 环境** | 直接用 CLI：`node dist/cli.js analyze <图片>` |
+
+### Pi 扩展方式（原生）
+
+```bash
+cp src/pi-extension.ts ~/.pi/extensions/   # 或 F:/pi-agent/extensions/
+```
+
+提供 `mm_vision` 工具 + 粘贴图片自动分析 + `/vision` 命令。
+
+## ⚙️ 配置
+
+API key 解析顺序：
+
+1. 配置文件的 `apiKey` 字段
+2. 环境变量：`MM_VISION_API_KEY` → `DASHSCOPE_API_KEY` → `QWEN_API_KEY` → `OPENAI_API_KEY` → `GEMINI_API_KEY`
+3. `auth.json`（`~/.config/mm-vision/auth.json` / `~/.pi/auth.json` / 项目根），支持 `{"apiKey":…}` 与 `{"provider":{…}}` 两种形态
+
+配置文件查找顺序（首个命中）：
+
+```
+$MM_VISION_CONFIG
+~/.config/mm-vision/config.json
+~/.mm-vision.json
+<项目根>/vision-config.json
+<cwd>/vision-config.json
+<cwd>/.vision-config.json
+```
+
+示例 `vision-config.json`（见 `vision-config.example.json`）：
 
 ```json
 {
@@ -58,62 +97,75 @@ Example `vision-config.json`:
 }
 ```
 
-`dotMatrix: true` 时每次分析会额外生成一张 ASCII 点阵（像素级形状，含行列标尺），适合需要看曲线细节抖动的盘面场景；默认关闭省 token。
+> 用别的视觉模型？改 `model` + `baseUrl` 即可（OpenAI 兼容协议）。没有 DashScope key 也可以用 OPENAI_API_KEY / GEMINI_API_KEY。
 
-API key resolution order:
+## 🎯 使用
 
-1. `apiKey` in config
-2. Env: `MM_VISION_API_KEY` → `DASHSCOPE_API_KEY` → `QWEN_API_KEY` → `OPENAI_API_KEY`
-3. `auth.json` (looked up at `~/.pi/auth.json`, `<cwd>/auth.json`, `~/.config/mm-vision/auth.json`), supporting both `{"apiKey": "..."}` and `{"provider": {"type": "...", "key": "..."}}` shapes — vision/qwen/ali/dash/vl/token providers preferred
-
-## Usage
-
-### 1. Agent-invoked tool
-
-The `mm_vision` tool is registered automatically. Text-only agents call it with:
+### MCP（所有接入的 Agent）
 
 ```
-mm_vision(image: "F:/path/to/kline.png" | "https://..." | data-url, prompt?: "分析要求")
+mcp_vision(image: "F:/charts/kline.png", prompt: "标出支撑压力位坐标")
+mcp_vision(image: "https://example.com/chart.png")
 ```
 
-### 2. Paste an image in chat (auto mode)
+### CLI
 
-Paste an image with or without text — the extension intercepts it, encodes it, and injects the description into the conversation. The text model then reasons with the encoded description.
-
-### 3. Interactive command
-
-```
-/vision F:/path/to/kline.png 分析这张图的支撑压力位
-```
-
-## Modes
-
-| Mode | Tokens | Best for |
-|------|--------|----------|
-| `brief` | 512 | Quick glance: what is this image about? |
-| `full` | 2048 | General purpose, all identifiable elements |
-| `coords` | 2048 | **Charts / trading screenshots / UI**: every key element must carry precise (x%, y%) coordinates |
-| `auto` | — | Keyword detection: K线/图表/盘面/坐标/曲线/截图 → `coords`, otherwise `full` |
-
-Set `"mode"` in config, or auto mode reacts to prompt keywords (e.g. "分析这张K线图的支撑位" → coords).
-
-## Encoded output format
-
-```
-【图片通感编码（mm-vision）】模式:coords · 模型:qwen-vl-max
-1. 【画布】宽高比 16:9, 深色背景 #1e1e28
-2. 【元素】[K线蜡烛 | x=6%-94% | 24根 | 红#e0534b阳/绿#3fc47f阴]
-3. 【趋势线】[黄色虚线 | 从(6%,78%)到(94%,20%) | 斜率≈0.65]
-4. 【支撑位】[蓝色水平线 y=42% | 标注 "SUPPORT 275"]
-5. 【最高点】[黄色标注 | 位于 (68%,18%) | 对应收盘价 340]
-...
-（坐标均为百分比 (x%,y%) 原点左上，可直接引用）
+```bash
+mm-vision analyze F:/charts/kline.png
+mm-vision analyze https://example.com/chart.png "标出支撑压力位" 
+mm-vision analyze F:/charts/kline.png coords "只输出关键坐标"
+mm-vision config
 ```
 
-## Security note
+### Pi（原生扩展）
 
-This extension only sends images to the configured vision model for description. It never executes commands from image content. All analysis output is text injected into your conversation — treat it as untrusted input, as with any model output.
+```
+mm_vision(image: "F:/charts/kline.png", prompt: "分析这张图")
+/vision F:/charts/kline.png 支撑压力位在哪
+粘贴图片 → 自动分析并注入描述
+```
 
-## License
+## 📋 模式
+
+| 模式 | Tokens | 适用 |
+|------|--------|------|
+| `brief` | 512 | 快速浏览：这是什么图？ |
+| `full` | 2048 | 通用：全部可识别元素 |
+| `coords` | 2048 | **图表/盘面/UI**：每个关键元素必须带精确 (x%,y%) |
+| `auto` | — | 关键词识别（K线/图表/盘面/坐标/曲线/截图 → coords） |
+
+## 🧪 验证
+
+```bash
+# 用样例图测试（配置好 API key 后）
+mm-vision analyze examples/kline.png
+# 期望输出包含: 画布 / 元素 / 支撑位坐标 / 最高点坐标
+```
+
+样例输出（`examples/kline.output.txt`）展示了完整编码格式。
+
+## 🔒 安全
+
+- 只把图片发送到**你配置的**视觉模型做描述
+- 从不执行图片内容中的命令
+- 输出是注入对话的文本——与任何模型输出一样按不可信输入对待
+
+## 🏗 架构
+
+```
+src/
+├── core.ts           # 纯函数核心（零依赖）：配置/编码/缓存/点阵
+├── mcp-server.ts     # MCP server（stdio，JSON-RPC 2.0 手写零依赖）
+├── cli.ts            # 独立命令行入口
+└── pi-extension.ts   # Pi Agent 原生适配层
+scripts/
+└── ascii_dot.py      # 可选点阵生成器（PIL）
+examples/
+└── kline.png         # 样例 K 线图
+```
+
+**集成到其他 Agent？** 直接 `import { analyzeImage } from "mm-vision"`（npm 包形态），或起一个 MCP server。
+
+## 📄 License
 
 MIT
