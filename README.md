@@ -4,7 +4,9 @@
 
 通感编码器 — 让纯文本模型通过**结构化空间文字**获得像素级图片认知：视觉模型看原图 → 输出紧凑的坐标化描述（画布/元素/百分比坐标/形状/数值/关系）→ 注入给文本模型，后者凭文字重建画面、推理位置关系。
 
-![example](examples/kline.png)
+![example](examples/ad4ada560b059367cb047cacda5f0cc4.jpg)
+
+*示例：雪山湖景（1440×1440）——通感编码把任意图片（不只是 K 线）变成结构化空间文字*
 
 ## Why 通感编码?
 
@@ -13,7 +15,7 @@
 | 方案 | 问题 |
 |------|------|
 | ASCII 点阵 | 慢（外部进程）、token 爆炸（1200+）、丢失颜色/语义 |
-| 自然语言描述 | 模糊散文：模型知道"是K线图"但不知道**峰在哪、支撑在哪、趋势多陡** |
+| 自然语言描述 | 模糊散文：模型知道"是雪山"但不知道**主峰在哪、云海在哪、倒影位置** |
 
 通感编码走中间路线：**一次 API 调用**，视觉模型把图片翻译成**紧凑的坐标化空间描述**（像飞行员按坐标报告地形），文本模型据此重建场景，位置推理精确到像素级。
 
@@ -25,7 +27,7 @@
 - 🧠 **缓存**：TTL 内重复分析秒回（默认 600s / 100 条）
 - 🔌 **零硬编码**：模型 / baseUrl / API key / 配置路径全可配置；兼容任意 OpenAI 兼容视觉模型（qwen-vl / gpt-4o / glm-4v / kimi-vl / MiniMax-VL…）
 - 🖥️ **多宿主接入**：MCP（Claude Code / Codex / Pi / Cursor / opencode）+ CLI + Agent 扩展
-- 🎨 **双向协议（mcp_render）**：通感编码 → SVG 图片（矩形/圆/椭圆/多边形/箭头/文本/K线），纯文本 LLM 获得**画图**能力
+- 🎨 **双向协议（mcp_render）**：通感编码 → SVG 图片（矩形/圆/椭圆/多边形/箭头/文本/山体/湖面/任意元素），纯文本 LLM 获得**画图**能力
 - 🔬 **像素级渲染**：ASCII 点阵 / RGB三元组 / RGB三通道嵌套 → 像素网格，分块拼接（4×4=5万+像素），**文字→真彩色图片**
 - 🌐 **HTML 渲染器**：canvas putImageData 浏览器直接出图（零依赖、可缩放、一键保存 PNG）
 
@@ -168,24 +170,24 @@ mm-vision draw = 文字 → 程序画图       [文字模型 · 无损但画得�
 ### MCP（所有接入的 Agent）
 
 ```
-mcp_vision(image: "F:/charts/kline.png", prompt: "标出支撑压力位坐标")
+mcp_vision(image: "examples/ad4ada560b059367cb047cacda5f0cc4.jpg", prompt: "标出主峰和倒影的位置")
 mcp_vision(image: "https://example.com/chart.png")
 ```
 
 ### CLI
 
 ```bash
-mm-vision analyze F:/charts/kline.png
-mm-vision analyze https://example.com/chart.png "标出支撑压力位" 
-mm-vision analyze F:/charts/kline.png coords "只输出关键坐标"
+mm-vision analyze examples/ad4ada560b059367cb047cacda5f0cc4.jpg
+mm-vision analyze https://example.com/photo.jpg "描述主体位置"
+mm-vision analyze F:/xxx/photo.png coords "只输出关键坐标"
 mm-vision config
 ```
 
 ### Pi（原生扩展）
 
 ```
-mm_vision(image: "F:/charts/kline.png", prompt: "分析这张图")
-/vision F:/charts/kline.png 支撑压力位在哪
+mm_vision(image: "F:/xxx/photo.png", prompt: "分析这张图")
+/vision F:/xxx/photo.png 主体在哪
 粘贴图片 → 自动分析并注入描述
 ```
 
@@ -202,11 +204,11 @@ mm_vision(image: "F:/charts/kline.png", prompt: "分析这张图")
 
 ```bash
 # 用样例图测试（配置好 API key 后）
-mm-vision analyze examples/kline.png
-# 期望输出包含: 画布 / 元素 / 支撑位坐标 / 最高点坐标
+mm-vision analyze examples/ad4ada560b059367cb047cacda5f0cc4.jpg
+# 期望输出包含: 画布 / 元素坐标 / 山体与湖面关系 / 光线方向
 ```
 
-样例输出（`examples/kline.output.txt`）展示了完整编码格式。
+样例输出（`examples/mountain.output.txt` + `examples/ad4ada560b059367cb047cacda5f0cc4.encoded.md`）展示了完整编码格式。
 
 ## 🔒 安全
 
