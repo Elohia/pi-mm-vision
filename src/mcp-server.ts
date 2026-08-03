@@ -20,6 +20,7 @@
  */
 import * as readline from "readline";
 import { analyzeImage, loadConfig, VisionConfig } from "./core.js";
+import { renderSynesthesiaToSVG, synesthesiaToDataURL } from "./render.js";
 
 // ==================== MCP 协议常量 ====================
 
@@ -52,6 +53,32 @@ const VISION_TOOL = {
       },
     },
     required: ["image"],
+  },
+};
+
+const RENDER_TOOL = {
+  name: "mcp_render",
+  description:
+    "反向渲染（通感编码→图）：把 mcp_vision 输出的通感编码文本渲染成 SVG 图片。" +
+    "文本模型可输出坐标化描述（画布/元素/坐标/颜色）→ 生成真实图片，获得画图能力。" +
+    "支持 K线/折线/水平线/标注点/网格。返回 SVG 内容或 data URL。",
+  inputSchema: {
+    type: "object",
+    properties: {
+      synesthesia: {
+        type: "string",
+        description: "通感编码文本（mcp_vision 输出格式）",
+      },
+      width: {
+        type: "number",
+        description: "输出宽度 px（可选，默认 960）",
+      },
+      asDataUrl: {
+        type: "boolean",
+        description: "返回 data URL 而非纯 SVG（可选，默认 false）",
+      },
+    },
+    required: ["synesthesia"],
   },
 };
 
@@ -110,12 +137,31 @@ async function handleRequest(req: Request) {
       return;
 
     case "tools/list":
-      sendResult(id, { tools: [VISION_TOOL] });
+      sendResult(id, { tools: [VISION_TOOL, RENDER_TOOL] });
       return;
 
     case "tools/call": {
       const toolName = params?.name;
       const args = params?.arguments || {};
+
+      if (toolName === "mcp_render") {
+        if (!args.synesthesia) {
+          sendError(id, -32602, "Missing required argument: synesthesia");
+          return;
+        }
+        const svg = renderSynesthesiaToSVG(args.synesthesia, args.width || 960);
+        const out = args.asDataUrl ? synesthesiaToDataURL(args.synesthesia, args.width || 960) : svg;
+        sendResult(id, {
+          content: [{ type: "text", text: out }],
+          isError: false,
+          structuredContent: {
+            ok: true,
+            format: args.asDataUrl ? "data-url" : "svg",
+            bytes: svg.length,
+          },
+        });
+        return;
+      }
 
       if (toolName !== "mcp_vision") {
         sendError(id, -32602, `Unknown tool: ${toolName}`);

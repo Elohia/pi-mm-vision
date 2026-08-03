@@ -25,6 +25,7 @@
 - 🧠 **缓存**：TTL 内重复分析秒回（默认 600s / 100 条）
 - 🔌 **零硬编码**：模型 / baseUrl / API key / 配置路径全可配置；兼容任意 OpenAI 兼容视觉模型（qwen-vl / gpt-4o / glm-4v / kimi-vl / MiniMax-VL…）
 - 🖥️ **多宿主接入**：MCP（Claude Code / Codex / Pi / Cursor / opencode）+ CLI + Agent 扩展
+- 🎨 **双向协议（mcp_render）**：通感编码 → SVG 图片（矩形/圆/椭圆/多边形/箭头/文本/K线），纯文本 LLM 获得**画图**能力
 
 ## 🚀 安装（3 分钟）
 
@@ -99,6 +100,33 @@ $MM_VISION_CONFIG
 
 > 用别的视觉模型？改 `model` + `baseUrl` 即可（OpenAI 兼容协议）。没有 DashScope key 也可以用 OPENAI_API_KEY / GEMINI_API_KEY。
 
+## 🔄 双向协议：编码 ⇄ 渲染
+
+通感编码是**图像交换语言**，双向可用：
+
+```
+正方向（编码）：图片 → mcp_vision → 结构化坐标文字
+反方向（渲染）：坐标文字 → mcp_render → SVG/PNG 图片
+```
+
+纯文本 LLM 因此获得**画图能力**：输出坐标化描述 → 渲染成真实图片。
+
+```
+mcp_render(synesthesia: "【画布】16:9 浅色背景 #f5f6fa
+【元素】[矩形 | 位置(10%,10%) | 尺寸(35%x20%) | 颜色#4a90d9 | 圆角 | "登录按钮"]...")
+# → SVG 图片（含登录/注册按钮、圆点状态、箭头流程）
+```
+
+CLI 反向渲染：
+
+```bash
+mm-vision render encoded.txt -o chart.svg      # 通感编码文本 → SVG
+# 再用浏览器或 PIL 脚本转 PNG
+```
+
+支持元素：矩形 / 圆形 / 椭圆 / 多边形 / 箭头 / 文本 / 水平线 / 标注点 / K线蜡烛 / 网格。
+已闭环验证：编码 → 渲染 → 再识别，坐标与元素完全一致。
+
 ## 🎯 使用
 
 ### MCP（所有接入的 Agent）
@@ -156,7 +184,8 @@ mm-vision analyze examples/kline.png
 src/
 ├── core.ts           # 纯函数核心（零依赖）：配置/编码/缓存/点阵
 ├── mcp-server.ts     # MCP server（stdio，JSON-RPC 2.0 手写零依赖）
-├── cli.ts            # 独立命令行入口
+├── cli.ts            # 独立命令行入口（analyze / render）
+├── render.ts         # 反向渲染：通感编码 → SVG（通用矢量语言）
 └── pi-extension.ts   # Pi Agent 原生适配层
 scripts/
 └── ascii_dot.py      # 可选点阵生成器（PIL）

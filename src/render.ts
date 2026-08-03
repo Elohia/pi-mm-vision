@@ -1,0 +1,473 @@
+/**
+ * mm-render — 通感编码 → 图像解码器（反向渲染）
+ * ==================================================
+ * 把通感编码文本（mm_vision 输出）渲染成真实图片（SVG）。
+ * 形成双向协议：
+ *   encode: 图片 → 通感编码文字（mm_vision）
+ *   decode: 通感编码文字 → 图片（mm_render）
+ *
+ * 这让纯文本 LLM 获得"画图"能力：模型输出坐标化描述 → 渲染成图。
+ * 也是编码质量的闭环验证工具：原图 → 编码 → 渲染 → 对比。
+ *
+ * 零依赖：纯 TypeScript 字符串拼接生成 SVG（文本格式，任何浏览器可看）。
+ *
+ * 支持的编码元素（解析 SYNESTHESIA 输出格式）：
+ *   【画布】宽高比 16:9, 主背景色 #181c28
+ *   【元素】[类型 | 位置 | 尺寸 | 颜色 | 文本/数值]
+ *   【均线/折线】从(x%,y%)到(x%,y%) | 颜色 | 形状
+ *   【水平线】y=42% | 标注 "SUPPORT 275"
+ *   【最高点/标注】位于 (x%,y%) | 数值
+ *   【K线】x=4%-96% | N根 | 红#xxxxxx阳/绿#xxxxxx阴
+ */
+
+// ==================== 画布 ====================
+
+interface Canvas {
+  width: number;
+  height: number;
+  bgColor: string;
+}
+
+function parseAspectRatio(s: string): [number, number] {
+  const m = s.match(/(\d+)\s*[:：]\s*(\d+)/);
+  if (m) return [parseInt(m[1]), parseInt(m[2])];
+  if (/16[:：]9|宽屏|横/.test(s)) return [16, 9];
+  if (/9[:：]16|竖|手机/.test(s)) return [9, 16];
+  if (/1[:：]1|正方/.test(s)) return [1, 1];
+  return [4, 3];
+}
+
+function parseColor(s: string, fallback = "#888888"): string {
+  const m = s.match(/#[0-9a-fA-F]{3,8}/);
+  if (m) return m[0];
+  const named: Record<string, string> = {
+    红: "#e0534b", 绿: "#3fc47f", 蓝: "#5a8cff", 黄: "#f5c542", 青: "#00c8a0",
+    白: "#ffffff", 黑: "#111111", 橙: "#ff8c42", 紫: "#a855f7", 灰: "#888888",
+    red: "#e0534b", green: "#3fc47f", blue: "#5a8cff", yellow: "#f5c542",
+    cyan: "#00c8a0", white: "#ffffff", black: "#111111", orange: "#ff8c42",
+    purple: "#a855f7", gray: "#888888",
+  };
+  for (const [k, v] of Object.entries(named)) {
+    if (s.includes(k)) return v;
+  }
+  return fallback;
+}
+
+function parseXY(s: string): { x: number; y: number } | null {
+  const m = s.match(/\(?\s*(\d+(?:\.\d+)?)\s*[%,]\s*,\s*(\d+(?:\.\d+)?)\s*[%,]?\s*\)?/);
+  if (!m) return null;
+  return { x: parseFloat(m[1]), y: parseFloat(m[2]) };
+}
+
+// ==================== 元素解析 ====================
+
+interface RenderElement {
+  type: "candles" | "line" | "hline" | "vline" | "marker" | "text" | "rect" | "grid" | "circle" | "ellipse" | "polygon" | "arrow" | "label";
+  data: any;
+}
+
+/** 解析 [类型 | 字段...] 方括号块 */
+function parseBracketBody(line: string): string | null {
+  const m = line.match(/\[([^\]]+)\]/);
+  return m ? m[1] : null;
+}
+
+/** 从方括号块中取字段 */
+function field(body: string, keys: string[]): string | null {
+  for (const k of keys) {
+    const m = body.match(new RegExp(k + "\\s*\\(?\\s*([^)|]+)\\)?"));
+    if (m && !m[1].includes("到")) return m[1].trim();
+  }
+  return null;
+}
+
+/** 解析百分比坐标对 */
+function parseCoords(s: string): { x: number; y: number } | null {
+  if (!s) return null;
+  const m = s.match(/(\d+(?:\.\d+)?)\s*%?\s*,?\s*(?:y\s*=\s*)?(\d+(?:\.\d+)?)\s*%?/);
+  if (!m) return null;
+  return { x: parseFloat(m[1]), y: parseFloat(m[2]) };
+}
+
+/** 解析尺寸：30%x15% */
+function parseSize(s: string): { w: number; h: number } | null {
+  if (!s) return null;
+  const m = s.match(/(\d+(?:\.\d+)?)\s*%?\s*[xX,×]\s*(\d+(?:\.\d+)?)\s*%?/);
+  if (!m) return null;
+  return { w: parseFloat(m[1]), h: parseFloat(m[2]) };
+}
+
+/** 提取方括号内引号文本 */
+function quotedText(s: string): string | null {
+  const m = s.match(/["“”'‘’]([^"“”'‘’]{1,60})["“”'‘’]/);
+  return m ? m[1] : null;
+}
+
+/** 解析单行元素描述 → RenderElement（通用矢量语言：矩形/圆/椭圆/多边形/箭头/文本/K线） */
+function parseElement(line: string): RenderElement | null {
+  const lower = line.toLowerCase();
+
+  // ==================== 通用方括号块优先 ====================
+  const b = parseBracketBody(line);
+  if (b) {
+    // 矩形 / 方块 / 按钮 / 卡片
+    if (/矩形|方块|按钮|卡片|box|button|card|rect/i.test(b)) {
+      const pos = parseCoords(field(b, ["位置", "pos", "xy", "坐标"]) || "");
+      const sz = parseSize(field(b, ["尺寸", "大小", "size"]) || "");
+      const col = parseColor(b);
+      const solid = /实心|filled|solid/.test(b);
+      const label = quotedText(b);
+      return {
+        type: "rect",
+        data: {
+          x: pos?.x ?? 10, y: pos?.y ?? 10,
+          w: sz?.w ?? 20, h: sz?.h ?? 10,
+          fill: solid ? col : "none", stroke: col, strokeW: solid ? 0 : 2,
+          rx: /圆角|rounded/.test(b) ? 6 : 0,
+          label: label || "",
+        },
+      };
+    }
+    // 圆形 / 圆点
+    if (/圆形|圆点|球|circle|ball/i.test(b)) {
+      const pos = parseCoords(field(b, ["位置", "中心", "pos", "xy"]) || "");
+      const col = parseColor(b);
+      const radM = b.match(/半径\s*([\d.]+)\s*%?/i) || b.match(/r\s*=\s*([\d.]+)\s*%?/i);
+      return {
+        type: "circle",
+        data: {
+          x: pos?.x ?? 50, y: pos?.y ?? 50,
+          r: radM ? parseFloat(radM[1]) : 5,
+          fill: /实心|filled/.test(b) ? col : "none",
+          stroke: col, strokeW: /实心|filled/.test(b) ? 0 : 2,
+        },
+      };
+    }
+    // 椭圆
+    if (/椭圆|ellipse|oval/i.test(b)) {
+      const pos = parseCoords(field(b, ["位置", "中心", "pos"]) || "");
+      const sz = parseSize(field(b, ["尺寸", "大小", "size"]) || "");
+      const col = parseColor(b);
+      return {
+        type: "ellipse",
+        data: {
+          x: pos?.x ?? 50, y: pos?.y ?? 50,
+          rx: sz?.w ? sz.w / 2 : 10, ry: sz?.h ? sz.h / 2 : 6,
+          fill: /实心|filled/.test(b) ? col : "none",
+          stroke: col, strokeW: /实心|filled/.test(b) ? 0 : 2,
+        },
+      };
+    }
+    // 多边形 / 三角形
+    if (/多边形|三角形|polygon|triangle/i.test(b)) {
+      const pts = [...b.matchAll(/\(\s*([\d.]+)\s*%?\s*,\s*([\d.]+)\s*%?\s*\)/g)].map((m) => ({ x: parseFloat(m[1]), y: parseFloat(m[2]) }));
+      if (pts.length >= 3) {
+        const col = parseColor(b);
+        return { type: "polygon", data: { points: pts, fill: /实心|filled/.test(b) ? col : "none", stroke: col } };
+      }
+    }
+    // 箭头
+    if (/箭头|arrow/i.test(b)) {
+      const fm = b.match(/从\s*\(\s*([\d.]+)\s*%?\s*,\s*([\d.]+)\s*%?\s*\)/i);
+      const tm = b.match(/到\s*\(\s*([\d.]+)\s*%?\s*,\s*([\d.]+)\s*%?\s*\)/i);
+      if (fm && tm) {
+        return {
+          type: "arrow",
+          data: {
+            x0: parseFloat(fm[1]), y0: parseFloat(fm[2]),
+            x1: parseFloat(tm[1]), y1: parseFloat(tm[2]),
+            color: parseColor(b, "#ffffff"), width: /粗/.test(b) ? 4 : 2,
+          },
+        };
+      }
+    }
+    // 文本块
+    if (/文本|标题|文字|label|text|title/i.test(b) && !/标注|曲线转折|按钮/.test(b)) {
+      const pos = parseCoords(field(b, ["位置", "pos"]) || "");
+      const col = parseColor(b, "#ffffff");
+      const txt = quotedText(b) || b.replace(/^[^|]*[|]\s*/, "").split("|")[0].replace(/^(文本|标题|文字|label|text|title)\s*[:：]?\s*/i, "").trim().slice(0, 60);
+      const sizeM = b.match(/字号\s*([\d.]+)/i) || b.match(/size\s*=\s*([\d.]+)/i);
+      return {
+        type: "text",
+        data: {
+          x: pos?.x ?? 50, y: pos?.y ?? 50,
+          text: txt || "", color: col,
+          size: sizeM ? parseFloat(sizeM[1]) : 16,
+          bold: /粗|bold/.test(b),
+        },
+      };
+    }
+  }
+
+  // ==================== 兼容旧格式（半结构化） ====================
+
+  // K线蜡烛：[K线蜡烛 | x=6%-94% | 24根 | 红#e0534b阳/绿#3fc47f阴]
+  if (lower.includes("k线") || lower.includes("蜡烛") || lower.includes("kline")) {
+    const xm = line.match(/x\s*=\s*(\d+(?:\.\d+)?)\s*%?\s*-\s*(\d+(?:\.\d+)?)\s*%?/);
+    const nm = line.match(/(\d+)\s*根/);
+    const up = line.match(/(?:红|阳)[^/#]*?(#[\da-fA-F]{3,8})/) || line.match(/#([\da-fA-F]{3,8})[^\n]*(?:阳|up|红)/i);
+    const down = line.match(/(?:绿|阴)[^/#]*?(#[\da-fA-F]{3,8})/) || line.match(/#([\da-fA-F]{3,8})[^\n]*(?:阴|down|绿)/i);
+    return {
+      type: "candles",
+      data: {
+        x0: xm ? parseFloat(xm[1]) : 5,
+        x1: xm ? parseFloat(xm[2]) : 95,
+        count: nm ? parseInt(nm[1]) : 24,
+        upColor: up ? (up[1] ? "#" + up[1] : up[0]) : "#e0534b",
+        downColor: down ? (down[1] ? "#" + down[1] : down[0]) : "#3fc47f",
+      },
+    };
+  }
+
+  // 均线/趋势线/折线：[MA5 黄色 | 从(4%,72%)到(96%,30%) | 上升趋势]
+  if (lower.includes("从") && lower.includes("到") && (lower.includes("线") || lower.includes("均") || lower.includes("趋势"))) {
+    const from = line.match(/从\s*\(?\s*(\d+(?:\.\d+)?)\s*[%,]\s*,\s*(\d+(?:\.\d+)?)\s*[%,]?\s*\)?/);
+    const to = line.match(/到\s*\(?\s*(\d+(?:\.\d+)?)\s*[%,]\s*,\s*(\d+(?:\.\d+)?)\s*[%,]?\s*\)?/);
+    if (from && to) {
+      return {
+        type: "line",
+        data: {
+          x0: parseFloat(from[1]), y0: parseFloat(from[2]),
+          x1: parseFloat(to[1]), y1: parseFloat(to[2]),
+          color: parseColor(line, "#f5c542"),
+          width: /粗|bold|thick/.test(lower) ? 4 : 2,
+        },
+      };
+    }
+  }
+
+  // 水平线：支撑位/压力位/水平线 y=42% | 标注 "SUPPORT 275"
+  if ((lower.includes("支撑") || lower.includes("压力") || lower.includes("水平")) && line.includes("y=")) {
+    const ym = line.match(/y\s*=\s*(\d+(?:\.\d+)?)\s*%?/);
+    if (ym) {
+      const label = line.match(/["""']([^""""']+)["""']/) || line.match(/标注\s*[:：]?\s*([^\s|，,]+)/);
+      const isResist = lower.includes("压力") || lower.includes("resist");
+      return {
+        type: "hline",
+        data: {
+          y: parseFloat(ym[1]),
+          color: isResist ? "#ff8c8c" : "#00c8a0",
+          label: label ? label[1] : "",
+          isResist,
+        },
+      };
+    }
+  }
+
+  // 标注点：最高点/峰值/最低点 位于 (x%,y%) | 数值
+  if (line.includes("位于") || line.includes("位置") || lower.includes("peak") || lower.includes("标注")) {
+    const pos = line.match(/位于\s*\(?\s*(\d+(?:\.\d+)?)\s*[%,]\s*,\s*(\d+(?:\.\d+)?)\s*[%,]?\s*\)?/)
+      || line.match(/\(?\s*(\d+(?:\.\d+)?)\s*[%,]\s*,\s*(\d+(?:\.\d+)?)\s*[%,]?\s*\)?/);
+    if (pos) {
+      const val = line.match(/["""']([^""""']+)["""']/) || line.match(/(?:数值|值|价)\s*[:：]?\s*([\d.]+)/);
+      return {
+        type: "marker",
+        data: {
+          x: parseFloat(pos[1]), y: parseFloat(pos[2]),
+          label: val ? val[1] : "",
+          color: lower.includes("最低") || lower.includes("bottom") ? "#00c8a0" : "#ffd75e",
+        },
+      };
+    }
+  }
+
+  // 坐标轴
+  if (lower.includes("坐标轴") || lower.includes("axis")) {
+    return { type: "grid", data: { labels: line } };
+  }
+
+  return null;
+}
+
+// ==================== 渲染 ====================
+
+const SVG_NS = 'xmlns="http://www.w3.org/2000/svg"';
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function randSeeded(seed: number): () => number {
+  let s = seed;
+  return () => {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+}
+
+/**
+ * 通感编码文本 → SVG 字符串
+ * @param synesthesia 通感编码文本（mm_vision 输出）
+ * @param width 输出宽度 px（默认 960）
+ */
+export function renderSynesthesiaToSVG(synesthesia: string, width = 960): string {
+  const lines = synesthesia.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  // 画布解析
+  let canvas: Canvas = { width, height: Math.round(width * 9 / 16), bgColor: "#1a1e2c" };
+  for (const line of lines) {
+    if (line.includes("画布")) {
+      const ar = parseAspectRatio(line);
+      canvas.width = width;
+      canvas.height = Math.round(width * ar[1] / ar[0]);
+      canvas.bgColor = parseColor(line, "#1a1e2c");
+      break;
+    }
+  }
+
+  const W = canvas.width, H = canvas.height;
+  const px = (x: number) => (x / 100) * W;
+  const py = (y: number) => (y / 100) * H;
+
+  // 收集元素
+  const elements: RenderElement[] = [];
+  for (const line of lines) {
+    const body = line.replace(/^\d+\.\s*/, ""); // 去掉序号前缀
+    if (!body.startsWith("【") || body.includes("画布")) continue;
+    const el = parseElement(body);
+    if (el) elements.push(el);
+  }
+
+  // 统计 K 线数（供随机种子）
+  const candleEl = elements.find((e) => e.type === "candles");
+  const rng = randSeeded(candleEl ? candleEl.data.count * 7 + 13 : 42);
+
+  const parts: string[] = [];
+  parts.push(`<svg ${SVG_NS} width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
+  parts.push(`<rect width="${W}" height="${H}" fill="${canvas.bgColor}"/>`);
+  parts.push(`<defs><marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#778"/></marker></defs>`);
+
+  // 坐标轴 + 网格
+  const hasGrid = elements.some((e) => e.type === "grid");
+  if (hasGrid) {
+    parts.push(`<line x1="${px(6)}" y1="${py(90)}" x2="${px(96)}" y2="${py(90)}" stroke="#667" stroke-width="1.5"/>`);
+    parts.push(`<line x1="${px(6)}" y1="${py(8)}" x2="${px(6)}" y2="${py(90)}" stroke="#667" stroke-width="1.5"/>`);
+    for (let gx = 10; gx <= 90; gx += 10) {
+      parts.push(`<line x1="${px(gx)}" y1="${py(8)}" x2="${px(gx)}" y2="${py(90)}" stroke="#2a3044" stroke-width="0.5" stroke-dasharray="3,5"/>`);
+    }
+    for (let gy = 10; gy <= 80; gy += 10) {
+      parts.push(`<line x1="${px(6)}" y1="${py(gy)}" x2="${px(96)}" y2="${py(gy)}" stroke="#2a3044" stroke-width="0.5" stroke-dasharray="3,5"/>`);
+    }
+    parts.push(`<text x="${px(50)}" y="${py(95)}" fill="#889" font-size="12" text-anchor="middle" font-family="monospace">time</text>`);
+    parts.push(`<text x="${px(2)}" y="${py(10)}" fill="#889" font-size="12" font-family="monospace">price</text>`);
+  }
+
+  // ── 通用图形：矩形 / 圆形 / 椭圆 / 多边形 / 箭头 / 文本 ──
+  for (const e of elements) {
+    const d = e.data;
+    switch (e.type) {
+      case "rect": {
+        parts.push(`<rect x="${px(d.x)}" y="${py(d.y)}" width="${px(d.w)}" height="${py(d.h)}" fill="${d.fill}" stroke="${d.stroke}" stroke-width="${d.strokeW}" rx="${d.rx}"/>`);
+        if (d.label) parts.push(`<text x="${px(d.x) + px(d.w) / 2}" y="${py(d.y) + py(d.h) / 2 + 5}" fill="${d.stroke}" font-size="13" text-anchor="middle" font-family="monospace">${esc(d.label)}</text>`);
+        break;
+      }
+      case "circle": {
+        parts.push(`<circle cx="${px(d.x)}" cy="${py(d.y)}" r="${px(d.r)}" fill="${d.fill}" stroke="${d.stroke}" stroke-width="${d.strokeW}"/>`);
+        break;
+      }
+      case "ellipse": {
+        parts.push(`<ellipse cx="${px(d.x)}" cy="${py(d.y)}" rx="${px(d.rx)}" ry="${py(d.ry)}" fill="${d.fill}" stroke="${d.stroke}" stroke-width="${d.strokeW}"/>`);
+        break;
+      }
+      case "polygon": {
+        const pts = d.points.map((pt: any) => `${px(pt.x)},${py(pt.y)}`).join(" ");
+        parts.push(`<polygon points="${pts}" fill="${d.fill}" stroke="${d.stroke}" stroke-width="2"/>`);
+        break;
+      }
+      case "arrow": {
+        const dx = px(d.x1) - px(d.x0), dy = py(d.y1) - py(d.y0);
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const ux = dx / len, uy = dy / len;
+        const hx = px(d.x1) - ux * 12, hy = py(d.y1) - uy * 12;
+        parts.push(`<line x1="${px(d.x0)}" y1="${py(d.y0)}" x2="${hx}" y2="${hy}" stroke="${d.color}" stroke-width="${d.width}"/>`);
+        parts.push(`<polygon points="${px(d.x1)},${py(d.y1)} ${hx - uy * 5},${hy + ux * 5} ${hx + uy * 5},${hy - ux * 5}" fill="${d.color}"/>`);
+        break;
+      }
+      case "text": {
+        parts.push(`<text x="${px(d.x)}" y="${py(d.y)}" fill="${d.color}" font-size="${d.size}" font-weight="${d.bold ? 700 : 400}" font-family="monospace">${esc(d.text)}</text>`);
+        break;
+      }
+    }
+  }
+
+  // 折线
+  for (const e of elements) {
+    if (e.type !== "line") continue;
+    const d = e.data;
+    parts.push(`<line x1="${px(d.x0)}" y1="${py(d.y0)}" x2="${px(d.x1)}" y2="${py(d.y1)}" stroke="${d.color}" stroke-width="${d.width}"/>`);
+    // 箭头（趋势方向）
+    parts.push(`<line x1="${px(d.x1)}" y1="${py(d.y1)}" x2="${px(d.x1)}" y2="${py(d.y1)}" stroke="${d.color}" stroke-width="0" marker-end="url(#arr)"/>`);
+  }
+
+  // K线蜡烛（合成形态：编码只有范围/数量/颜色，渲染为趋势化蜡烛）
+  if (candleEl) {
+    const d = candleEl.data;
+    const n = Math.min(d.count, 120);
+    const x0 = px(d.x0), x1 = px(d.x1);
+    const cw = (x1 - x0) / n;
+    const bw = Math.max(cw * 0.55, 1);
+    // 用随机游走生成温和趋势
+    const ys: number[] = [70];
+    for (let i = 1; i < n; i++) ys.push(ys[i - 1] + (rng() - 0.45) * 5);
+    const ymin = Math.min(...ys), ymax = Math.max(...ys);
+    const norm = (v: number) => 80 - ((v - ymin) / Math.max(ymax - ymin, 1)) * 60;
+    for (let i = 0; i < n; i++) {
+      const cx = x0 + cw * i + cw / 2;
+      const o = ys[i];
+      const c = ys[Math.min(i + 1, n - 1)];
+      const up = c >= o;
+      const col = up ? d.upColor : d.downColor;
+      const yo = py(norm(o)), yc = py(norm(c));
+      const hi = py(norm(Math.max(o, c) + 0.6)), lo = py(norm(Math.min(o, c) - 0.6));
+      parts.push(`<line x1="${cx}" y1="${hi}" x2="${cx}" y2="${lo}" stroke="${col}" stroke-width="1.2"/>`);
+      parts.push(`<rect x="${cx - bw / 2}" y="${Math.min(yo, yc)}" width="${bw}" height="${Math.max(Math.abs(yo - yc), 1)}" fill="${col}"/>`);
+    }
+  }
+
+  // 水平线（支撑/压力）
+  for (const e of elements) {
+    if (e.type !== "hline") continue;
+    const d = e.data;
+    parts.push(`<line x1="${px(5)}" y1="${py(d.y)}" x2="${px(96)}" y2="${py(d.y)}" stroke="${d.color}" stroke-width="2.5"/>`);
+    if (d.label) {
+      parts.push(`<text x="${px(70)}" y="${py(d.y) - 10}" fill="${d.color}" font-size="13" font-family="monospace">${esc(d.label)}</text>`);
+    }
+  }
+
+  // 标注点
+  for (const e of elements) {
+    if (e.type !== "marker") continue;
+    const d = e.data;
+    parts.push(`<circle cx="${px(d.x)}" cy="${py(d.y)}" r="6" fill="none" stroke="${d.color}" stroke-width="2"/>`);
+    if (d.label) {
+      parts.push(`<text x="${px(d.x) + 10}" y="${py(d.y) - 8}" fill="${d.color}" font-size="13" font-family="monospace">${esc(d.label)}</text>`);
+    }
+  }
+
+  // 原文备注（如果有"关系"描述，作为图注）
+  const rel = lines.find((l) => l.includes("关系"));
+  if (rel) {
+    parts.push(`<text x="${px(50)}" y="${py(97)}" fill="#778" font-size="11" text-anchor="middle" font-family="monospace">${esc(rel.slice(0, 80))}</text>`);
+  }
+
+  parts.push(`</svg>`);
+  return parts.join("\n");
+}
+
+/**
+ * 通感编码 → PNG（需要 scripts/render_svg.py + Pillow 的 cairosvg，或浏览器）
+ * 简化：输出 SVG 文件路径 + 可选 base64 data URL
+ */
+export function renderSynesthesiaToSVGFile(synesthesia: string, outPath: string, width = 960): string {
+  const svg = renderSynesthesiaToSVG(synesthesia, width);
+  const fs = require("fs");
+  fs.writeFileSync(outPath, svg, "utf-8");
+  return outPath;
+}
+
+// ==================== CLI 便捷 ====================
+
+export function synesthesiaToDataURL(synesthesia: string, width = 960): string {
+  const svg = renderSynesthesiaToSVG(synesthesia, width);
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}

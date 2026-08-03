@@ -16,7 +16,9 @@
  *   mm-vision analyze F:/charts/kline.png coords "只输出坐标"
  */
 import { analyzeImage, loadConfig, cacheStats, configCandidates, packageRoot } from "./core.js";
+import { renderSynesthesiaToSVG, renderSynesthesiaToSVGFile } from "./render.js";
 import * as fs from "fs";
+import * as path from "path";
 
 async function main() {
   const args = process.argv.slice(2);
@@ -42,6 +44,33 @@ async function main() {
       const result = await analyzeImage(image, { prompt, mode }, cfg);
       console.log(result.text);
       if (!result.ok) process.exit(1);
+      return;
+    }
+
+    case "render": {
+      // 反向渲染：通感编码文本 → SVG 图片
+      const src = args[1];
+      if (!src) {
+        console.error("用法: mm-vision render <编码文本文件|或直接传文本> [-o out.svg] [--width 960]");
+        console.error("示例: mm-vision render encoded.txt -o chart.svg");
+        process.exit(2);
+      }
+      let outPath = "output.svg";
+      let width = 960;
+      const rest = args.slice(2);
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === "-o" && rest[i + 1]) outPath = rest[i + 1];
+        if (rest[i] === "--width" && rest[i + 1]) width = parseInt(rest[i + 1]);
+      }
+      let text = src;
+      if (fs.existsSync(src)) text = fs.readFileSync(src, "utf-8");
+      const svg = renderSynesthesiaToSVG(text, width);
+      if (fs.existsSync(path.dirname(path.resolve(outPath))) || path.dirname(outPath) === ".") {
+        fs.writeFileSync(outPath, svg, "utf-8");
+        console.log(`✅ 已渲染: ${path.resolve(outPath)} (${svg.length} bytes SVG)`);
+      } else {
+        console.log(svg);
+      }
       return;
     }
 
@@ -75,6 +104,7 @@ async function main() {
 
 用法:
   mm-vision analyze <image> [mode] [prompt]   分析图片并输出通感编码
+  mm-vision render <encoded.txt> [-o out.svg]  反向：通感编码 → SVG 图片
   mm-vision config                             查看当前配置
   mm-vision cache                              缓存统计
   mm-vision help                               本帮助
