@@ -201,19 +201,21 @@ async function main() {
       // 文字 → 图片：纯文字 LLM 直接生成（点阵/代码/通感）
       const prompt = args.slice(1).join(" ");
       if (!prompt) {
-        console.error("用法: mm-vision draw \"描述图片内容\" [-o out.png] [--ref 参考编码文件] [--tiled] [--grid 3x2]");
+        console.error("用法: mm-vision draw \"描述图片内容\" [-o out.png] [--ref 参考编码文件] [--tiled] [--layout] [--grid 3x2]");
         console.error("示例: mm-vision draw \"画一张雪山湖景\" --tiled --grid 2x2");
         process.exit(2);
       }
       let outPath = "mm-draw.png";
       let refPath: string | undefined;
       let tiled = false;
+      let layoutFirst = false;
       let gridCols = 2, gridRows = 2;
       const rest = args.slice(1);
       for (let i = 0; i < rest.length; i++) {
         if (rest[i] === "-o" && rest[i + 1]) { outPath = rest[i + 1]; rest.splice(i, 2); i--; }
         if (rest[i] === "--ref" && rest[i + 1]) { refPath = rest[i + 1]; rest.splice(i, 2); i--; }
         if (rest[i] === "--tiled") { tiled = true; rest.splice(i, 1); i--; }
+        if (rest[i] === "--layout") { layoutFirst = true; tiled = true; rest.splice(i, 1); i--; }
         if (rest[i] === "--grid" && rest[i + 1]) {
           tiled = true;
           const [gc, gr] = rest[i + 1].split("x").map((n) => parseInt(n.trim()));
@@ -228,7 +230,7 @@ async function main() {
         console.log(`📐 参考锚点已加载: ${refPath} (${referenceEncoding.length} 字符)`);
       }
       console.log(`🎨 文字绘图: "${realPrompt}" → ${outPath}`);
-      const result = await drawImage(realPrompt, { outPath, referenceEncoding, tiled, grid: tiled ? { cols: gridCols, rows: gridRows } : undefined });
+      const result = await drawImage(realPrompt, { outPath, referenceEncoding, tiled, layoutFirst, grid: tiled ? { cols: gridCols, rows: gridRows } : undefined });
       if (result.ok) {
         console.log(`✅ 图片已生成: ${path.resolve(result.imagePath)} (通道: ${result.mode})`);
         if (result.text) console.log(result.text);

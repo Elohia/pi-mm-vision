@@ -130,23 +130,48 @@ interface LLMConfig {
 }
 
 async function llmText(prompt: string, cfg: LLMConfig, signal?: AbortSignal): Promise<string> {
-  const resp = await fetch(cfg.baseUrl.replace(/\/$/, "") + "/chat/completions", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: cfg.model,
-      messages: [{ role: "user", content: prompt }],
-      max_tokens: cfg.maxTokens ?? 4096,
-      temperature: 0.7,
-    }),
-    signal,
-  });
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`LLM 调用失败 (${resp.status}): ${err.slice(0, 300)}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 300000); // 300s 超时（思考模型大输出慢）
+  const outer = signal;
+  const onAbort = () => controller.abort();
+  if (outer) {
+    if (outer.aborted) controller.abort();
+    else outer.addEventListener("abort", onAbort);
   }
-  const data: any = await resp.json();
-  return data?.choices?.[0]?.message?.content || "";
+  let lastError: string = "";
+  try {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const resp = await fetch(cfg.baseUrl.replace(/\/$/, "") + "/chat/completions", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: cfg.model,
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: cfg.maxTokens ?? 4096,
+            temperature: 0.7,
+          }),
+          signal: controller.signal,
+        });
+        if (!resp.ok) {
+          const err = await resp.text();
+          throw new Error(`LLM 调用失败 (${resp.status}): ${err.slice(0, 300)}`);
+        }
+        const data: any = await resp.json();
+        return data?.choices?.[0]?.message?.content || "";
+      } catch (e: any) {
+        lastError = String(e?.message || e);
+        if (attempt === 1) {
+          await new Promise((r) => setTimeout(r, 2000)); // 重试前等待
+          continue;
+        }
+      }
+    }
+    throw new Error(`LLM 调用失败（重试后仍失败）: ${lastError.slice(0, 300)}`);
+  } finally {
+    clearTimeout(timeout);
+    if (outer) outer.removeEventListener("abort", onAbort);
+  }
 }
 
 /** 容错 JSON 解析（剥离 markdown 围栏，截取 {} 区间，修复未转义引号） */
@@ -245,6 +270,127 @@ ${referenceEncoding ? `\n【参考通感编码】（可选，提供空间布局�
 只输出 JSON`;
 
 
+
+// ==================== 布局先行模式 ====================
+
+const LAYOUT_PROMPT = (userPrompt: string) => `你是"图像布局规划器"。用户描述一张图片，你规划它的空间布局——哪些物体在什么区域。
+
+用户需求：${userPrompt}
+
+输出严格 JSON（不要围栏不要多余文字）：
+{"layout": [{"name": "物体名", "region": [x1,y1,x2,y2], "color": "颜色描述", "note": "细节提示"}, ...]}
+
+规则：
+1. region 用百分比坐标 [左上x, 左上y, 右下x, 右下y]（0-100），覆盖整张图
+2. 分层：先天空/背景，再远景（山/建筑），再中景（云/水面），最后近景（草地/道路/人）
+3. 物体区域可以有重叠（如云在天空内、倒影在湖内）
+4. color 写清楚主色和渐变方向（如"淡蓝到暖黄渐变，日出方向右上"）
+5. note 写该物体的细节特征（如"雪山山顶白带淡蓝阴影，山体灰褐岩石"）
+6. 4-10 个物体，覆盖全图不留空洞
+
+只输出 JSON`;
+
+const LAYOUT_TILE_PROMPT = (userPrompt: string, layoutText: string, blockIndex: number, totalBlocks: number, blockX: number, blockY: number, gridCols: number, gridRows: number) =>
+  `你是"点阵绘图引擎"。整图被分成 ${gridCols}x${gridRows} 网格，你现在绘制第 ${blockX + 1} 列第 ${blockY + 1} 行的一块（块 ${blockIndex + 1}/${totalBlocks}）。逐点输出颜色，不写代码。
+
+整图需求：${userPrompt}
+
+【全局布局】（百分比坐标，左上原点）：
+${layoutText}
+
+【本块位置】列 ${blockX + 1}/${gridCols}，行 ${blockY + 1}/${gridRows}（左上 1,1；右下 ${gridCols},${gridRows}）
+【本块尺寸】24 列 x 16 行 = 384 点（行 0=块顶，行 19=块底；列 0=块左，列 29=块右）
+
+输出严格 JSON（不要围栏）：
+{"rows": ["R,G,B R,G,B ...", "..."]}
+
+规则：
+1. rows **必须恰好 16 行**，每行**恰好 24 个色点**，格式 "R,G,B" 逗号分隔、点间空格分隔；禁止 "R G B" 空格三元组；**20x30 一行不能少**
+2. 把本块的全局位置换算到布局：本块左上角全局坐标 = (${blockX * 24 / gridCols / 2.4}%, ${blockY * 16 / gridRows / 1.6}%) 附近（块宽=${100 / gridCols}%，高=${100 / gridRows}%）
+3. 判断本块覆盖了布局中的哪些物体，按物体颜色逐点着色；物体边界处颜色切换，物体内部渐变
+4. 颜色要平滑渐变、有明暗层次（光照方向一致），不要平涂纯色
+5. 全部 384 点完整输出
+
+只输出 JSON`;
+
+/** 布局先行分块生成 */
+export async function drawImageLayoutFirst(
+  userPrompt: string,
+  opts: {
+    outPath?: string;
+    grid?: { cols: number; rows: number };
+    llmConfig?: Partial<LLMConfig>;
+    signal?: AbortSignal;
+  } = {},
+): Promise<DrawResult> {
+  const outPath = opts.outPath || path.resolve("mm-draw-layout.png");
+  const cols = opts.grid?.cols ?? 2;
+  const rows = opts.grid?.rows ?? 2;
+  const TILE_W = 24, TILE_H = 16;
+
+  const vcfg = loadConfig();
+  const llm: LLMConfig = {
+    model: process.env.MM_DRAW_MODEL || vcfg.model,
+    baseUrl: vcfg.baseUrl,
+    apiKey: vcfg.apiKey,
+    maxTokens: 8192,
+    ...opts.llmConfig,
+  };
+  if (!llm.apiKey) {
+    return { ok: false, mode: "layout-tiles", imagePath: outPath, error: "未找到 API key" };
+  }
+
+  // 第一步：布局
+  console.log("  [布局] 规划全局布局...");
+  const layoutRaw = await llmText(LAYOUT_PROMPT(userPrompt), llm, opts.signal);
+  const layoutPlan = parseJsonLoose(layoutRaw);
+  if (!layoutPlan || !Array.isArray(layoutPlan.layout)) {
+    return { ok: false, mode: "layout-tiles", imagePath: outPath, error: `布局输出无法解析: ${layoutRaw.slice(0, 200)}` };
+  }
+  const layoutText = JSON.stringify(layoutPlan.layout, null, 1);
+  console.log(`  [布局] ${layoutPlan.layout.length} 个物体: ${layoutPlan.layout.map((o: any) => o.name).join(", ")}`);
+
+  // 第二步：逐块着色
+  const total = cols * rows;
+  const tileRowData: string[][][] = [];
+  for (let by = 0; by < rows; by++) {
+    const rowBlocks: string[][] = [];
+    for (let bx = 0; bx < cols; bx++) {
+      const idx = by * cols + bx;
+      const prompt = LAYOUT_TILE_PROMPT(userPrompt, layoutText, idx, total, bx, by, cols, rows);
+      const raw = await llmText(prompt, llm, opts.signal);
+      const plan = parseJsonLoose(raw);
+      if (!plan || !Array.isArray(plan.rows)) {
+        return { ok: false, mode: "layout-tiles", imagePath: outPath, error: `块 ${idx} 输出无法解析: ${raw.slice(0, 150)}` };
+      }
+      const tileRows = plan.rows.filter((r: string) => typeof r === "string" && r.trim());
+      console.log(`  [块 ${idx} ${bx + 1}x${by + 1}] 行数: ${tileRows.length}`);
+      rowBlocks.push(tileRows);
+    }
+    tileRowData.push(rowBlocks);
+  }
+
+  // 拼装
+  const fullRows: string[] = [];
+  for (let by = 0; by < rows; by++) {
+    for (let ly = 0; ly < TILE_H; ly++) {
+      const lineParts: string[] = [];
+      for (let bx = 0; bx < cols; bx++) {
+        const tileRows = tileRowData[by][bx];
+        if (ly < tileRows.length) lineParts.push(tileRows[ly].trim());
+      }
+      fullRows.push(lineParts.join(" "));
+    }
+  }
+
+  try {
+    const { width, height } = gridToPNG(fullRows, outPath);
+    return { ok: true, mode: "layout-tiles", imagePath: outPath, text: `布局先行分块 → PNG (${width}x${height}, ${layoutPlan.layout.length} 物体, ${cols}x${rows} 块)` };
+  } catch (e: any) {
+    return { ok: false, mode: "layout-tiles", imagePath: outPath, error: String(e?.message || e) };
+  }
+}
+
 // ==================== 分块矩阵生成 ====================
 
 const TILE_PROMPT = (userPrompt: string, blockIndex: number, totalBlocks: number, blockX: number, blockY: number, gridCols: number, gridRows: number) =>
@@ -259,7 +405,7 @@ const TILE_PROMPT = (userPrompt: string, blockIndex: number, totalBlocks: number
 {"rows": ["R,G,B R,G,B ...", "..."]}
 
 规则：
-1. rows **必须恰好 20 行**，每行**恰好 30 个色点**；**每个色点必须写成 "R,G,B" 逗号分隔**（如 255,214,170），点与点之间用空格分隔；禁止写成 "255 214 170" 空格三元组形式。**30 行 40 列一行都不能少**，宁可重复上一行的颜色也不许省略。
+1. rows **必须恰好 16 行**，每行**恰好 24 个色点**；**每个色点必须写成 "R,G,B" 逗号分隔**（如 255,214,170），点与点之间用空格分隔；禁止写成 "255 214 170" 空格三元组形式。**30 行 40 列一行都不能少**，宁可重复上一行的颜色也不许省略。
 2. 用常识判断本块属于整图的哪个区域并上色：
    - 行 0-7 通常是天空（蓝/渐变），除非本块行号靠下
    - 根据块位置与整图布局对应：例如 3x2 网格中，块(1,2)=左下角可能是草地/地面，块(3,1)=右上角是天空/远景
@@ -282,7 +428,7 @@ export async function drawImageTiled(
   const outPath = opts.outPath || path.resolve("mm-draw-tiled.png");
   const cols = opts.grid?.cols ?? 2;
   const rows = opts.grid?.rows ?? 2;
-  const TILE_W = 30, TILE_H = 20;  // 30x20=600点，deepseek 输出上限内完整
+  const TILE_W = 24, TILE_H = 16;  // 24x16=384点，快且完整
 
   const vcfg = loadConfig();
   const llm: LLMConfig = {
@@ -342,9 +488,20 @@ export async function drawImageTiled(
 
 export async function drawImage(
   userPrompt: string,
-  opts: { outPath?: string; llmConfig?: Partial<LLMConfig>; width?: number; signal?: AbortSignal; referenceEncoding?: string; tiled?: boolean; grid?: { cols: number; rows: number } } = {},
+  opts: { outPath?: string; llmConfig?: Partial<LLMConfig>; width?: number; signal?: AbortSignal; referenceEncoding?: string; tiled?: boolean; layoutFirst?: boolean; grid?: { cols: number; rows: number } } = {},
 ): Promise<DrawResult> {
   // 分块高清模式：tiled=true 或 prompt 含"高清/分块/大图"关键词
+  if (opts.layoutFirst || /布局先行|layout-first|layoutfirst/i.test(userPrompt)) {
+    let grid: { cols: number; rows: number } | undefined = opts.grid;
+    if (!grid) {
+      const gridEnv = process.env.MM_DRAW_GRID;
+      if (gridEnv && gridEnv.includes("x")) {
+        const [gc, gr] = gridEnv.split("x").map((n) => parseInt(n.trim()));
+        if (gc && gr) grid = { cols: gc, rows: gr };
+      }
+    }
+    return drawImageLayoutFirst(userPrompt, { outPath: opts.outPath, llmConfig: opts.llmConfig, signal: opts.signal, grid });
+  }
   if (opts.tiled || /高清|分块|大图|高分辨率|tiled|hi-res/i.test(userPrompt)) {
     return drawImageTiled(userPrompt, { outPath: opts.outPath, llmConfig: opts.llmConfig, signal: opts.signal, grid: opts.grid });
   }
