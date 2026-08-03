@@ -48,8 +48,8 @@ const VISION_TOOL = {
       },
       mode: {
         type: "string",
-        enum: ["brief", "full", "coords", "auto"],
-        description: "编码模式（可选，默认 auto）",
+        enum: ["brief", "full", "coords", "auto", "pixel"],
+        description: "编码模式（可选，默认 auto；pixel=像素级色块网格，用于重建原图）",
       },
     },
     required: ["image"],

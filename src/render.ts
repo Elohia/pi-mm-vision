@@ -1056,3 +1056,198 @@ export function parseRGBChannels(text: string): { width: number; height: number;
   }
   return { width, height, cells };
 }
+
+
+// ==================== 像素级重建（pixel 模式） ====================
+
+export interface PixelGridCell {
+  r: number; g: number; b: number;
+  dir: string;   // 渐变方向: ←↑→↓↖↗↘↙ 或 ·
+  detail: boolean; // '!' 标记：有细纹理
+}
+
+export interface PixelGrid {
+  cols: number;
+  rows: number;
+  cells: PixelGridCell[][];
+}
+
+/**
+ * 解析 pixel 模式的【色块网格】输出 → 结构化网格
+ * 支持格式：R,G,B← / R,G,B / R,G,B! 
+ */
+export function parsePixelGrid(text: string): PixelGrid | null {
+  // 找【色块网格】段或纯 16x12 数字网格
+  const section = text.match(/【\s*色块网格[^】]*】\s*([\s\S]*?)(?=【|$)/);
+  const body = section ? section[1] : text;
+  const lines = body.split(/\r?\n/)
+    .map((l) => l.replace(/^\s*\d*\|/, "").trim())
+    .filter((l) => l.includes(",") && /^[\d,\s!←↑→↓↖↗↘↙·]+$/.test(l));
+  if (lines.length < 2) return null;
+
+  const cells: PixelGridCell[][] = [];
+  let cols = 0;
+  for (const line of lines) {
+    const row: PixelGridCell[] = [];
+    // 匹配 R,G,B 后跟方向字符或 !
+    const re = /(\d{1,3}),(\d{1,3}),(\d{1,3})([←↑→↓↖↗↘↙·]?)(!?)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) {
+      row.push({
+        r: Math.min(255, parseInt(m[1])),
+        g: Math.min(255, parseInt(m[2])),
+        b: Math.min(255, parseInt(m[3])),
+        dir: m[4] || "·",
+        detail: m[5] === "!",
+      });
+    }
+    if (row.length > 0) {
+      cells.push(row);
+      cols = Math.max(cols, row.length);
+    }
+  }
+  if (cells.length < 2 || cols < 2) return null;
+  return { cols, rows: cells.length, cells };
+}
+
+/** 方向字符 → 单位向量（用于块内渐变） */
+function dirVector(dir: string): [number, number] {
+  switch (dir) {
+    case "←": return [-1, 0];
+    case "→": return [1, 0];
+    case "↑": return [0, -1];
+    case "↓": return [0, 1];
+    case "↖": return [-0.71, -0.71];
+    case "↗": return [0.71, -0.71];
+    case "↘": return [0.71, 0.71];
+    case "↙": return [-0.71, 0.71];
+    default: return [0, 0];
+  }
+}
+
+/**
+ * 色块网格 → 平滑插值渲染
+ * 核心：相邻格颜色线性插值（消除块状感）+ 块内渐变方向 + 纹理抖动
+ */
+export function pixelGridToHTML(grid: PixelGrid, opts: { scale?: number; smooth?: boolean; title?: string } = {}): string {
+  const scale = opts.scale ?? 6;
+  const smooth = opts.smooth ?? true;
+  const W = grid.cols, H = grid.rows;
+  const title = opts.title ?? "mm-vision 像素级重建";
+  const outW = W * scale, outH = H * scale;
+
+  // 生成像素数据：插值后每个输出像素一个 RGB
+  // 先做网格→高清插值（双线性）
+  const px = new Array(outW * outH * 4).fill(0);
+  const get = (cx: number, cy: number): [number, number, number] => {
+    const x = Math.max(0, Math.min(grid.cols - 1, cx));
+    const y = Math.max(0, Math.min(grid.rows - 1, cy));
+    const c = grid.cells[y][x];
+    return [c.r, c.g, c.b];
+  };
+
+  for (let py = 0; py < outH; py++) {
+    for (let pxx = 0; pxx < outW; pxx++) {
+      // 映射回网格坐标（带平滑）
+      const gx = (pxx + 0.5) / scale - 0.5;
+      const gy = (py + 0.5) / scale - 0.5;
+      let r: number, g: number, b: number;
+      if (smooth) {
+        // 双线性插值
+        const x0 = Math.floor(gx), y0 = Math.floor(gy);
+        const fx = gx - x0, fy = gy - y0;
+        const c00 = get(x0, y0), c10 = get(x0 + 1, y0), c01 = get(x0, y0 + 1), c11 = get(x0 + 1, y0 + 1);
+        r = (c00[0] * (1 - fx) + c10[0] * fx) * (1 - fy) + (c01[0] * (1 - fx) + c11[0] * fx) * fy;
+        g = (c00[1] * (1 - fx) + c10[1] * fx) * (1 - fy) + (c01[1] * (1 - fx) + c11[1] * fx) * fy;
+        b = (c00[2] * (1 - fx) + c10[2] * fx) * (1 - fy) + (c01[2] * (1 - fx) + c11[2] * fx) * fy;
+      } else {
+        const c = get(Math.round(gx), Math.round(gy));
+        r = c[0]; g = c[1]; b = c[2];
+      }
+      const i = (py * outW + pxx) * 4;
+      px[i] = Math.round(r); px[i + 1] = Math.round(g); px[i + 2] = Math.round(b); px[i + 3] = 255;
+    }
+  }
+
+  const data = JSON.stringify(Array.from({ length: outW * outH }, (_, i) => [
+    i % outW, Math.floor(i / outW), px[i * 4], px[i * 4 + 1], px[i * 4 + 2]
+  ]));
+
+  return `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>${title}</title>
+<style>
+  body { margin: 0; background: #111; display: flex; flex-direction: column; align-items: center; padding: 16px; font-family: monospace; }
+  canvas { display: block; image-rendering: pixelated; border: 1px solid #333; }
+  .bar { color: #888; font-size: 12px; margin: 8px 0; }
+  button { background: #1d4ed8; color: #fff; border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+</style>
+</head>
+<body>
+  <div class="bar">${title} — ${grid.cols}×${grid.rows} 网格 → ${outW}×${outH} 平滑插值（点击保存 PNG）</div>
+  <canvas id="cv" width="${outW}" height="${outH}"></canvas>
+  <div class="bar"><button onclick="save()">💾 保存 PNG</button></div>
+<script>
+const W = ${outW}, H = ${outH};
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const img = ctx.createImageData(W, H);
+const cells = ${data};
+for (const [x, y, r, g, b] of cells) {
+  const i = (y * W + x) * 4;
+  img.data[i] = r; img.data[i + 1] = g; img.data[i + 2] = b; img.data[i + 3] = 255;
+}
+ctx.putImageData(img, 0, 0);
+function save() {
+  const out = document.createElement("canvas");
+  out.width = W; out.height = H;
+  const octx = out.getContext("2d");
+  octx.putImageData(img, 0, 0);
+  out.toBlob(b => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b);
+    a.download = "mm-vision-pixel-${Date.now()}.png";
+    a.click();
+  });
+}
+</script>
+</body>
+</html>`;
+}
+
+/**
+ * 色块网格 → SVG（矢量渐变块，无浏览器依赖）
+ * 每格一个 rect + linearGradient（方向），detail 格加噪点
+ */
+export function pixelGridToSVG(grid: PixelGrid, opts: { scale?: number; title?: string } = {}): string {
+  const scale = opts.scale ?? 8;
+  const W = grid.cols * scale, H = grid.rows * scale;
+  const parts: string[] = [];
+  parts.push(`<svg ${SVG_NS} width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
+  const defs: string[] = [];
+  let gid = 0;
+  for (let y = 0; y < grid.rows; y++) {
+    for (let x = 0; x < grid.cols; x++) {
+      const c = grid.cells[y][x];
+      const [dx, dy] = dirVector(c.dir);
+      const col = `#${c.r.toString(16).padStart(2, "0")}${c.g.toString(16).padStart(2, "0")}${c.b.toString(16).padStart(2, "0")}`;
+      if (c.dir !== "·" && (dx !== 0 || dy !== 0)) {
+        // 渐变：沿方向从亮到暗（模拟光照）
+        const gidNow = `g${gid++}`;
+        const x1 = 50 + dx * 50, y1 = 50 + dy * 50;
+        const x2 = 50 - dx * 50, y2 = 50 - dy * 50;
+        const light = `#${Math.min(255, c.r + 40).toString(16).padStart(2, "0")}${Math.min(255, c.g + 40).toString(16).padStart(2, "0")}${Math.min(255, c.b + 40).toString(16).padStart(2, "0")}`;
+        const dark = `#${Math.max(0, c.r - 40).toString(16).padStart(2, "0")}${Math.max(0, c.g - 40).toString(16).padStart(2, "0")}${Math.max(0, c.b - 40).toString(16).padStart(2, "0")}`;
+        defs.push(`<linearGradient id="${gidNow}" x1="${x1}%" y1="${y1}%" x2="${x2}%" y2="${y2}%"><stop offset="0%" stop-color="${light}"/><stop offset="100%" stop-color="${dark}"/></linearGradient>`);
+        parts.push(`<rect x="${x * scale}" y="${y * scale}" width="${scale}" height="${scale}" fill="url(#${gidNow})"/>`);
+      } else {
+        parts.push(`<rect x="${x * scale}" y="${y * scale}" width="${scale}" height="${scale}" fill="${col}"/>`);
+      }
+    }
+  }
+  return parts.join("\n").replace('<svg ', `<svg ${SVG_NS} `) ? `<svg ${SVG_NS} width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+${defs.join("\n")}
+${parts.slice(1).join("\n")}` : "";
+}

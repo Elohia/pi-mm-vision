@@ -16,9 +16,10 @@
  *   mm-vision analyze F:/charts/kline.png coords "只输出坐标"
  */
 import { analyzeImage, loadConfig, cacheStats, configCandidates, packageRoot } from "./core.js";
-import { renderSynesthesiaToSVG, renderSynesthesiaToSVGFile, extractAsciiMatrix, asciiMatrixToPixels, pixelsToSVG, pixelsToHTML, rgbToHTML, parseRGBMatrix, parseRGBChannels, parseTiledMatrix, tiledToSVG } from "./render.js";
+import { renderSynesthesiaToSVG, renderSynesthesiaToSVGFile, extractAsciiMatrix, asciiMatrixToPixels, pixelsToSVG, pixelsToHTML, rgbToHTML, parseRGBMatrix, parseRGBChannels, parseTiledMatrix, tiledToSVG, parsePixelGrid, pixelGridToHTML, pixelGridToSVG } from "./render.js";
 import * as fs from "fs";
 import * as path from "path";
+import { drawImage } from "./draw.js";
 
 async function main() {
   const args = process.argv.slice(2);
@@ -119,6 +120,14 @@ async function main() {
       }
       const text = fs.readFileSync(src, "utf-8");
 
+      // 0) 像素级色块网格（pixel 模式输出）
+      const pg = parsePixelGrid(text);
+      if (pg) {
+        const html = pixelGridToHTML(pg, { scale, title: "mm-vision 像素级重建" });
+        fs.writeFileSync(outPath, html, "utf-8");
+        console.log(`✅ HTML 已生成: ${path.resolve(outPath)} (色块网格 ${pg.cols}x${pg.rows} → ${pg.cols * scale}x${pg.rows * scale} 平滑插值)`);
+        return;
+      }
       // 1) RGB 三元组矩阵
       const rgb = parseRGBMatrix(text);
       if (rgb) {
@@ -149,6 +158,33 @@ async function main() {
       const html = pixelsToHTML(m.cells, { width: m.width, height: m.height, fg, bg, scale, title: "mm-vision 点阵" });
       fs.writeFileSync(outPath, html, "utf-8");
       console.log(`✅ HTML 已生成: ${path.resolve(outPath)} (${m.width}x${m.height}，${m.cells.length} 像素)`);
+      return;
+    }
+
+    case "draw": {
+      // 文字 → 图片：纯文字 LLM 直接生成（PIL 代码 或 通感描述）
+      const prompt = args.slice(1).join(" ");
+      if (!prompt) {
+        console.error("用法: mm-vision draw \"描述图片内容\" [-o out.png]");
+        console.error("示例: mm-vision draw \"画一张雪山湖景：金色雪山倒映在蓝色湖面\"");
+        process.exit(2);
+      }
+      let outPath = "mm-draw.png";
+      const rest = args.slice(1);
+      // 重新解析：prompt 可能是最后一个参数
+      const realPrompt = rest.filter((a) => !a.startsWith("-o")).join(" ");
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === "-o" && rest[i + 1]) outPath = rest[i + 1];
+      }
+      console.log(`🎨 文字绘图: "${realPrompt}" → ${outPath}`);
+      const result = await drawImage(realPrompt, { outPath });
+      if (result.ok) {
+        console.log(`✅ 图片已生成: ${path.resolve(result.imagePath)} (通道: ${result.mode})`);
+        if (result.text) console.log(result.text);
+      } else {
+        console.error(`❌ 生成失败: ${result.error}`);
+        process.exit(1);
+      }
       return;
     }
 
