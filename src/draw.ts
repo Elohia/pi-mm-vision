@@ -16,6 +16,7 @@ import { renderSynesthesiaToSVG, parsePixelGrid, pixelGridToHTML, pixelGridToSVG
 import * as fs from "fs";
 import * as path from "path";
 import { execFile } from "child_process";
+import * as zlib from "zlib";
 
 // ==================== 类型 ====================
 
@@ -25,6 +26,81 @@ export interface DrawResult {
   imagePath: string;
   text?: string;
   error?: string;
+}
+
+
+// ==================== 零依赖 PNG 编码器（Node zlib） ====================
+
+/** RGB 像素数组 → PNG Buffer（无任何第三方依赖） */
+export function encodePNG(width: number, height: number, pixels: Uint8Array): Buffer {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const typeBuf = Buffer.from(type, "ascii");
+    const crc = Buffer.alloc(4);
+    const crcTable = (() => {
+      const t: number[] = [];
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        t[n] = c >>> 0;
+      }
+      return t;
+    })();
+    let c = 0xffffffff;
+    for (const byte of Buffer.concat([typeBuf, data])) {
+      c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+    }
+    crc.writeUInt32BE((c ^ 0xffffffff) >>> 0);
+    return Buffer.concat([len, typeBuf, data, crc]);
+  };
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  const raw = Buffer.alloc(height * (1 + width * 3));
+  let o = 0;
+  for (let y = 0; y < height; y++) {
+    raw[o++] = 0;
+    for (let x = 0; x < width * 3; x++) raw[o++] = pixels[y * width * 3 + x];
+  }
+  const idat = zlib.deflateSync(raw);
+
+  return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
+}
+
+/** RGB 网格（行数组，每行 "R,G,B R,G,B..."）→ PNG 文件 */
+export function gridToPNG(rows: string[], outPath: string): { width: number; height: number } {
+  const parsed: number[][] = rows.map((r) => {
+    return r.split(/\s+/).filter(Boolean).map((p) => {
+      const m = p.match(/^(\d{1,3}),(\d{1,3}),(\d{1,3})$/);
+      if (!m) return null;
+      return [Math.min(255, parseInt(m[1])), Math.min(255, parseInt(m[2])), Math.min(255, parseInt(m[3]))];
+    }).filter((v): v is number[] => !!v).flat();
+  }).filter((r) => r.length > 0);
+  const height = parsed.length;
+  const width = parsed[0]?.length ? parsed[0].length / 3 : 0;
+  if (width === 0 || height === 0) throw new Error("网格为空");
+  const pixels = new Uint8Array(width * height * 3);
+  for (let y = 0; y < height; y++) {
+    const row = parsed[y];
+    for (let x = 0; x < width; x++) {
+      pixels[(y * width + x) * 3] = row[x * 3];
+      pixels[(y * width + x) * 3 + 1] = row[x * 3 + 1];
+      pixels[(y * width + x) * 3 + 2] = row[x * 3 + 2];
+    }
+  }
+  const png = encodePNG(width, height, pixels);
+  fs.writeFileSync(outPath, png);
+  return { width, height };
 }
 
 // ==================== LLM 调用（OpenAI 兼容，纯文本） ====================
@@ -73,6 +149,22 @@ function parseJsonLoose(text: string): any {
   const end = t.lastIndexOf("}");
   if (start >= 0 && end > start) {
     try { return JSON.parse(t.slice(start, end + 1)); } catch { /* fallthrough */ }
+    // 截断恢复：JSON 尾部不完整时，尝试补全 ]}" 
+    try {
+      const partial = t.slice(start, end + 1);
+      const repaired = partial.replace(/\[\s*$/, '[]').replace(/([^\[\]\{\},:])\s*$/, '$1]}');
+      // 简单策略：找到最后一个完整行后补 ]
+      const m = partial.match(/^(.*"rows":\s*\[.*?)(?:\n|$)/s);
+      if (m) {
+        const rowsPart = m[1];
+        // 数完整行：每行以 "R,G,B...", 结尾
+        const rows = rowsPart.match(/"([\d,\s]+)"/g) || [];
+        if (rows.length > 0) {
+          const rebuilt = `{"mode":"scan","rows":[${rows.join(",")}]}`;
+          return JSON.parse(rebuilt);
+        }
+      }
+    } catch { /* fallthrough */ }
   }
   return null;
 }
@@ -107,42 +199,34 @@ function runPILScript(code: string, outPath: string): Promise<string> {
 
 // ==================== 生成 Prompt ====================
 
-const DRAW_PROMPT = (userPrompt: string) => `你是"文字绘图引擎"。根据用户描述，生成一张图片的实现方案。
+const DRAW_PROMPT = (userPrompt: string, referenceEncoding?: string) => `你是"文字绘图引擎"。根据用户描述，生成一张图片的实现方案。
 
 用户需求：${userPrompt}
+${referenceEncoding ? `\n【参考通感编码】（可选，提供空间结构锚点）：\n${referenceEncoding}` : ""}
 
-输出严格 JSON（不要 markdown 围栏，不要多余文字），格式：
-{"mode": "pil", "code": "完整 Python 脚本"} 
-或
-{"mode": "sync", "description": "通感描述"}
+输出严格 JSON（不要 markdown 围栏，不要多余文字）。三种通道任选其一，**通用优先 pil**：
+1. {"mode": "pil", "code": "完整 Python PIL 脚本"}
+2. {"mode": "scan", "rows": ["R,G,B R,G,B ...", "..."]}
+3. {"mode": "sync", "description": "通感描述"}
 
-通道说明：
-1. mode=pil：写完整、自包含的 Python PIL 脚本。规则：
-   - 第一行必须 import（from PIL import Image, ImageDraw, ImageFont 等）
-   - 用变量 img = Image.new(...) 创建画布
-   - 全部使用纯色/渐变/几何/文字绘制，不要加载外部文件
-   - 渐变用逐像素或 ImageDraw 方式实现
-   - 脚本末尾必须用 img.save("out.png") 保存（路径变量由系统注入）
-   - 代码要能直接运行，不要注释废话
-2. mode=sync：输出通感编码描述（我们渲染器解析）：
-   【画布】宽高比 + 背景色
-   【元素】[矩形 | 位置(10%,10%) | 尺寸(30%x20%) | 颜色#4a90d9 | 圆角 | "文字"]
-   【元素】[圆形 | 中心(50%,50%) | 半径10% | 颜色#ff4d4f | 实心]
-   【元素】[折线(点(10%,80%)(30%,60%)(50%,70%)(70%,40%)(90%,30%)) | 颜色#f5c542 | 粗]
-   【元素】[文本 | 位置(50%,20%) | 内容"标题" | 字号24 | 颜色#ffffff | 粗体]
-   【元素】[箭头 | 从(20%,60%)到(80%,40%) | 颜色#ffffff]
-   【元素】[多边形 | 点(10%,90%)(25%,95%)(25%,85%) | 颜色#faad14 | 实心]
+通道选择规则：
+- **默认选 pil**：PIL 代码是最通用的——任何场景（城市街景、电路图、抽象图案、人物、动物、图表）都能用代码画出来，token 效率最高，不会截断。写完整自包含脚本：from PIL import Image, ImageDraw, ImageFont；用 img = Image.new() 创建；渐变用逐像素或 ImageDraw；脚本末尾 img.save("out.png")。
+- 只有当你觉得代码写不出来（需要照片级真实感、大量随机纹理）时才选 scan。
+- sync 用于界面/图表/几何示意图。
 
-要求：
-- 优先选 pil（代码通道）实现复杂/渐变/自然场景
-- 选 sync（通感通道）实现界面/图表/几何示意图
-- 只输出 JSON`;
+mode=scan 规则（点阵扫描）：
+- 分辨率自适应：复杂场景 40x30（1200点），简单场景 32x24
+- rows 每行 "R,G,B" 空格分隔，共 height 行
+- 用常识上色：天空蓝渐变在上、山体灰褐带雪白顶、湖水青蓝有倒影、草地绿、城市楼宇灰蓝带窗光
+- 相邻点平滑过渡；有参考编码时严格按编码空间布局
+
+只输出 JSON`;
 
 // ==================== 主入口 ====================
 
 export async function drawImage(
   userPrompt: string,
-  opts: { outPath?: string; llmConfig?: Partial<LLMConfig>; width?: number; signal?: AbortSignal } = {},
+  opts: { outPath?: string; llmConfig?: Partial<LLMConfig>; width?: number; signal?: AbortSignal; referenceEncoding?: string } = {},
 ): Promise<DrawResult> {
   const outPath = opts.outPath || path.resolve("mm-draw.png");
   // LLM 配置：优先 draw 专用环境变量，否则复用 mm-vision 视觉配置（同 baseUrl/key，不同模型）
@@ -151,7 +235,7 @@ export async function drawImage(
     model: process.env.MM_DRAW_MODEL || vcfg.model,
     baseUrl: vcfg.baseUrl,
     apiKey: vcfg.apiKey,
-    maxTokens: 4096,
+    maxTokens: 12000,
     ...opts.llmConfig,
   };
   if (!llm.apiKey) {
@@ -159,7 +243,7 @@ export async function drawImage(
   }
 
   // 1. LLM 生成方案
-  const raw = await llmText(DRAW_PROMPT(userPrompt), llm, opts.signal);
+  const raw = await llmText(DRAW_PROMPT(userPrompt, opts.referenceEncoding), llm, opts.signal);
   const plan = parseJsonLoose(raw);
   if (!plan || !plan.mode) {
     // 尝试直接提取 PIL 代码
@@ -182,6 +266,24 @@ export async function drawImage(
       return { ok: true, mode: "pil", imagePath: outPath };
     } catch (e: any) {
       return { ok: false, mode: "pil", imagePath: outPath, error: String(e?.message || e) };
+    }
+  }
+
+  if (plan.mode === "scan" && Array.isArray(plan.rows)) {
+    try {
+      const { width, height } = gridToPNG(plan.rows, outPath);
+      return { ok: true, mode: "scan", imagePath: outPath, text: `扫描点阵 → PNG (${width}x${height})` };
+    } catch (e: any) {
+      // 部分行损坏时：保留完整行（补齐宽度）
+      try {
+        const valid = plan.rows.filter((r: string) => typeof r === "string" && r.trim());
+        const w = Math.max(...valid.map((r: string) => r.trim().split(/\s+/).filter(Boolean).length)) / 3;
+        if (valid.length > 5 && w > 5) {
+          const { width, height } = gridToPNG(valid, outPath);
+          return { ok: true, mode: "scan", imagePath: outPath, text: `扫描点阵（部分行）→ PNG (${width}x${height})` };
+        }
+      } catch { /* fallthrough */ }
+      return { ok: false, mode: "scan", imagePath: outPath, error: String(e?.message || e) };
     }
   }
 

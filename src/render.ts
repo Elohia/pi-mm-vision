@@ -533,8 +533,116 @@ function parseElement(line: string): RenderElement | null {
     }
   }
 
-  // ==================== 兼容旧格式（半结构化） ====================
-  // 密集折线（点→线）
+  // ==================== 元素列表格式（mm_vision 真实输出） ====================
+  // - 类型|范围(x,y-x,y 或 单点)|尺寸(wxh)|颜色|标注
+  // 示例: - 主雪峰|30,19-70,38|40x19|雪白+金色日照|顶点(49,19)
+  //       - 湖面|0,58-100,84|100x26|青蓝|-
+  //       - 涟漪A|中心(68,64)|半径≈6|同心圆|-
+  if (line.startsWith("- ") || line.startsWith("• ") || line.startsWith("* ")) {
+    const parts = line.replace(/^[-•*]\s+/, "").split("|").map((p) => p.trim());
+    if (parts.length >= 2) {
+      const type = parts[0].toLowerCase();
+      const range = parts[1];
+      const size = parts[2] || "";
+      const colorDesc = parts[3] || "";
+      const label = parts[4] && parts[4] !== "-" ? parts[4] : "";
+      const col = parseColor(colorDesc, "#cccccc");
+
+      // 范围解析：x1,y1-x2,y2 或 中心(x,y) 或 x,y
+      let x0: number | null = null, y0: number | null = null, x1: number | null = null, y1: number | null = null;
+      const boxMatch = range.match(/(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)/);
+      if (boxMatch) {
+        x0 = parseFloat(boxMatch[1]); y0 = parseFloat(boxMatch[2]);
+        x1 = parseFloat(boxMatch[3]); y1 = parseFloat(boxMatch[4]);
+      } else {
+        const center = range.match(/中心\s*\(?\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)/);
+        if (center) {
+          x0 = parseFloat(center[1]); y0 = parseFloat(center[2]);
+        }
+      }
+
+      // 尺寸解析：WxH
+      let w: number | null = null, h: number | null = null;
+      const sizeMatch = size.match(/(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)/);
+      if (sizeMatch) { w = parseFloat(sizeMatch[1]); h = parseFloat(sizeMatch[2]); }
+      // 半径（涟漪/圆）
+      const radMatch = size.match(/半径≈?(\d+(?:\.\d+)?)/) || range.match(/半径≈?(\d+(?:\.\d+)?)/);
+
+      // 圆形：涟漪/圆点/球
+      if (/涟漪|圆|球|circle|ball/.test(type)) {
+        if (x0 !== null && y0 !== null) {
+          return {
+            type: "circle",
+            data: {
+              x: x0, y: y0,
+              r: radMatch ? parseFloat(radMatch[1]) : (w ? w / 2 : 5),
+              fill: "none", stroke: col, strokeW: 2,
+            },
+          };
+        }
+      }
+      // 矩形/区域：天空/云海/草地/湖面/坡/带/脊/岸
+      if (/天空|云海|草地|湖|坡|带|脊|岸|田|区域|rect|band|area/.test(type)) {
+        if (x0 !== null && y0 !== null && x1 !== null && y1 !== null) {
+          return {
+            type: "rect",
+            data: {
+              x: x0, y: y0,
+              w: x1 - x0, h: y1 - y0,
+              fill: col, stroke: col, strokeW: 0,
+              rx: 0, label: "",
+            },
+          };
+        }
+      }
+      // 山/峰/三角形：主雪峰/左雪峰/岩脊/三角
+      if (/雪峰|峰|山|岩|脊|三角|peak|mountain|ridge/.test(type)) {
+        if (x0 !== null && y0 !== null && x1 !== null && y1 !== null) {
+          const cx = (x0 + x1) / 2;
+          // 顶点：尝试从标注取 (x,y)
+          const apex = label.match(/\(?(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)\)?/) || (label.includes("顶点") ? null : null);
+          const apexX = apex ? parseFloat(apex[1]) : cx;
+          const apexY = apex ? parseFloat(apex[2]) : y0;
+          return {
+            type: "polygon",
+            data: {
+              points: [
+                { x: x0, y: y1 }, { x: x1, y: y1 }, { x: apexX, y: apexY },
+              ],
+              fill: col, stroke: col,
+            },
+          };
+        }
+      }
+      // 溪/路/线
+      if (/溪|路|线|river|path|trail/.test(type)) {
+        if (x0 !== null && y0 !== null && x1 !== null && y1 !== null) {
+          return {
+            type: "line",
+            data: { x0, y0, x1, y1, color: col, width: /白|white/.test(colorDesc) ? 3 : 2 },
+          };
+        }
+      }
+      // 树/瀑布/石/其他：小矩形
+      if (x0 !== null && y0 !== null && x1 !== null && y1 !== null) {
+        return {
+          type: "rect",
+          data: {
+            x: x0, y: y0, w: x1 - x0, h: y1 - y0,
+            fill: col, stroke: col, strokeW: 0, rx: 0, label: "",
+          },
+        };
+      }
+      if (x0 !== null && y0 !== null && w && h) {
+        return {
+          type: "rect",
+          data: { x: x0, y: y0, w, h, fill: col, stroke: col, strokeW: 0, rx: 0, label: "" },
+        };
+      }
+    }
+  }
+
+
   if (b && /折线|polyline/.test(b) && b.includes("(")) {
     const el = parsePolyline(b);
     if (el) return el;

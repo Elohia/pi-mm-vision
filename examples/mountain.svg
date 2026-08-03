@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="960" viewBox="0 0 960 960">
+<rect width="960" height="960" fill="#3fc47f"/>
+<defs><marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#778"/></marker></defs>
+<text x="480" y="931.1999999999999" fill="#778" font-size="11" text-anchor="middle" font-family="monospace">【关系】</text>
+</svg>
