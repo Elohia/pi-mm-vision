@@ -26,6 +26,7 @@
 - 🔌 **零硬编码**：模型 / baseUrl / API key / 配置路径全可配置；兼容任意 OpenAI 兼容视觉模型（qwen-vl / gpt-4o / glm-4v / kimi-vl / MiniMax-VL…）
 - 🖥️ **多宿主接入**：MCP（Claude Code / Codex / Pi / Cursor / opencode）+ CLI + Agent 扩展
 - 🎨 **双向协议（mcp_render）**：通感编码 → SVG 图片（矩形/圆/椭圆/多边形/箭头/文本/K线），纯文本 LLM 获得**画图**能力
+- 🔬 **像素级渲染**：ASCII 点阵 → 像素网格 SVG（点→线→面链路），纯文本模型输出点阵即可生成像素级图片
 
 ## 🚀 安装（3 分钟）
 
@@ -121,10 +122,11 @@ CLI 反向渲染：
 
 ```bash
 mm-vision render encoded.txt -o chart.svg      # 通感编码文本 → SVG
-# 再用浏览器或 PIL 脚本转 PNG
+mm-vision pixels smile.txt -o smile.svg        # ASCII 点阵 → 像素网格 SVG（像素级）
+# 再用 scripts/svg2png.py 转 PNG
 ```
 
-支持元素：矩形 / 圆形 / 椭圆 / 多边形 / 箭头 / 文本 / 水平线 / 标注点 / K线蜡烛 / 网格。
+支持元素：矩形 / 圆形 / 椭圆 / 多边形 / 箭头 / 文本 / 水平线 / 标注点 / K线蜡烛 / 网格 / **密集折线（点→线）** / **面填充（线→面）** / **像素网格（点阵→像素）**。
 已闭环验证：编码 → 渲染 → 再识别，坐标与元素完全一致。
 
 ## 🎯 使用
@@ -185,7 +187,7 @@ src/
 ├── core.ts           # 纯函数核心（零依赖）：配置/编码/缓存/点阵
 ├── mcp-server.ts     # MCP server（stdio，JSON-RPC 2.0 手写零依赖）
 ├── cli.ts            # 独立命令行入口（analyze / render）
-├── render.ts         # 反向渲染：通感编码 → SVG（通用矢量语言）
+├── render.ts         # 反向渲染：通感编码 → SVG（矢量 + 像素级点阵）
 └── pi-extension.ts   # Pi Agent 原生适配层
 scripts/
 └── ascii_dot.py      # 可选点阵生成器（PIL）

@@ -16,7 +16,7 @@
  *   mm-vision analyze F:/charts/kline.png coords "只输出坐标"
  */
 import { analyzeImage, loadConfig, cacheStats, configCandidates, packageRoot } from "./core.js";
-import { renderSynesthesiaToSVG, renderSynesthesiaToSVGFile } from "./render.js";
+import { renderSynesthesiaToSVG, renderSynesthesiaToSVGFile, extractAsciiMatrix, asciiMatrixToPixels, pixelsToSVG } from "./render.js";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -71,6 +71,32 @@ async function main() {
       } else {
         console.log(svg);
       }
+      return;
+    }
+
+    case "pixels": {
+      // 像素级：ASCII 点阵 → 像素网格 SVG
+      const src = args[1];
+      if (!src) {
+        console.error("用法: mm-vision pixels <点阵文件> [-o out.svg] [--width 960] [--fg #39d353] [--bg #0d1117]");
+        process.exit(2);
+      }
+      let outPath = "pixels.svg";
+      let width = 960, fg = "#39d353", bg = "#0d1117";
+      const rest = args.slice(2);
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === "-o" && rest[i + 1]) outPath = rest[i + 1];
+        if (rest[i] === "--width" && rest[i + 1]) width = parseInt(rest[i + 1]);
+        if (rest[i] === "--fg" && rest[i + 1]) fg = rest[i + 1];
+        if (rest[i] === "--bg" && rest[i + 1]) bg = rest[i + 1];
+      }
+      let text = fs.readFileSync(src, "utf-8");
+      const matrix = extractAsciiMatrix(text) || text; // 直接点阵文件则全文即矩阵
+      const m = asciiMatrixToPixels(matrix);
+      const pixelSize = Math.max(1, Math.floor(width / m.width));
+      const svg = pixelsToSVG(m, { pixelSize, fg, bg });
+      fs.writeFileSync(outPath, svg, "utf-8");
+      console.log(`✅ 像素网格已渲染: ${path.resolve(outPath)} (${m.width}x${m.height}, ${m.cells.length} 像素, ${svg.length} bytes)`);
       return;
     }
 

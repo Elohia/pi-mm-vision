@@ -62,7 +62,8 @@ function parseXY(s: string): { x: number; y: number } | null {
 // ==================== 元素解析 ====================
 
 interface RenderElement {
-  type: "candles" | "line" | "hline" | "vline" | "marker" | "text" | "rect" | "grid" | "circle" | "ellipse" | "polygon" | "arrow" | "label";
+  type: "candles" | "line" | "hline" | "vline" | "marker" | "text" | "rect" | "grid" | "circle" | "ellipse" | "polygon" | "arrow" | "label"
+    | "pixels" | "polyline" | "path";
   data: any;
 }
 
@@ -101,6 +102,106 @@ function parseSize(s: string): { w: number; h: number } | null {
 function quotedText(s: string): string | null {
   const m = s.match(/["“”'‘’]([^"“”'‘’]{1,60})["“”'‘’]/);
   return m ? m[1] : null;
+}
+
+/**
+ * ASCII 点阵 → 像素网格数据
+ * 每字符一格：非空格字符 = 填充像素，空格 = 透明
+ * 支持灰度字符映射（@%#*+=-:. 由亮到暗）
+ */
+export function asciiMatrixToPixels(ascii: string): { width: number; height: number; cells: { x: number; y: number; gray: number }[] } {
+  const lines = ascii.split(/\r?\n/);
+  const height = lines.length;
+  const width = Math.max(...lines.map((l) => l.length));
+  const cells: { x: number; y: number; gray: number }[] = [];
+  // 灰度字符表（亮→暗）：' ' 0, '.' 1, ':' 2, '-' 3, '=' 4, '+' 5, '*' 6, '#' 7, '%' 8, '@' 9
+  const ramp: Record<string, number> = { " ": 0, ".": 1, ":": 2, "-": 3, "=": 4, "+": 5, "*": 6, "#": 7, "%": 8, "@": 9 };
+  lines.forEach((line, y) => {
+    for (let x = 0; x < line.length; x++) {
+      const ch = line[x];
+      const g = ramp[ch] ?? 9;
+      if (g > 0) cells.push({ x, y, gray: g / 9 });
+    }
+  });
+  return { width, height, cells };
+}
+
+/**
+ * 像素网格 → 密集 SVG（每个像素一个 rect）
+ * 默认透明背景 + 亮色像素（dark-mode 终端点阵的常规渲染）
+ */
+export function pixelsToSVG(
+  matrix: { width: number; height: number; cells: { x: number; y: number; gray: number }[] },
+  opts: { pixelSize?: number; bg?: string; fg?: string; width?: number } = {},
+): string {
+  const pixelSize = opts.pixelSize ?? 8;
+  const W = matrix.width * pixelSize;
+  const H = matrix.height * pixelSize;
+  const bg = opts.bg ?? "#0d1117";
+  const fg = opts.fg ?? "#39d353";
+  const parts: string[] = [];
+  parts.push(`<svg ${SVG_NS} width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`);
+  parts.push(`<rect width="${W}" height="${H}" fill="${bg}"/>`);
+  // 灰度色阶：fg 混合到 bg
+  for (const c of matrix.cells) {
+    const gray = c.gray;
+    // 插值颜色
+    const mix = (a: number, b: number, t: number) => Math.round(a + (b - a) * t);
+    const fgr = parseInt(fg.slice(1, 3), 16), fgg = parseInt(fg.slice(3, 5), 16), fgb = parseInt(fg.slice(5, 7), 16);
+    const bgr = parseInt(bg.slice(1, 3), 16), bgg = parseInt(bg.slice(3, 5), 16), bgb = parseInt(bg.slice(5, 7), 16);
+    const r = mix(bgr, fgr, gray).toString(16).padStart(2, "0");
+    const g = mix(bgg, fgg, gray).toString(16).padStart(2, "0");
+    const b = mix(bgb, fgb, gray).toString(16).padStart(2, "0");
+    const col = `#${r}${g}${b}`;
+    parts.push(`<rect x="${c.x * pixelSize}" y="${c.y * pixelSize}" width="${pixelSize}" height="${pixelSize}" fill="${col}"/>`);
+  }
+  parts.push(`</svg>`);
+  return parts.join("\n");
+}
+
+/** 从编码文本提取 ASCII 点阵块（```围栏或【点阵】段） */
+export function extractAsciiMatrix(text: string): string | null {
+  // 1) ``` 代码围栏
+  const fence = text.match(/```[^\n]*\n([\s\S]*?)```/);
+  if (fence && fence[1].includes("@") && fence[1].includes("0|")) return fence[1];
+  if (fence) return fence[1];
+  // 2) 【点阵】段
+  const m = text.match(/【[^】]*点阵[^】]*】[\s\S]*?```[^\n]*\n([\s\S]*?)```/);
+  if (m) return m[1];
+  return null;
+}
+
+// ==================== 密集图元解析（点→线→面） ====================
+
+/**
+ * 密集折线：折线(点(10,20)(12,25)(14,22)...) | 颜色 | 粗细
+ * 点坐标可以是百分比或像素（检测到 >100 视为像素）
+ */
+function parsePolyline(b: string): RenderElement | null {
+  const pts = [...b.matchAll(/\(\s*([\d.]+)\s*(?:%|px)?\s*,\s*([\d.]+)\s*(?:%|px)?\s*\)/g)]
+    .map((m) => ({ x: parseFloat(m[1]), y: parseFloat(m[2]) }));
+  if (pts.length < 2) return null;
+  const col = parseColor(b, "#39d353");
+  return {
+    type: "polyline",
+    data: { points: pts, color: col, width: /粗|bold/.test(b) ? 3 : 1.5, pxMode: pts.some((p) => p.x > 100 || p.y > 100) },
+  };
+}
+
+/**
+ * 面填充：面(点(10,10)(50,10)(50,50)(10,50)) | 颜色#xxx | 实心
+ * 折线/多边形闭合即面。
+ */
+function parseFace(b: string): RenderElement | null {
+  const pts = [...b.matchAll(/\(\s*([\d.]+)\s*(?:%|px)?\s*,\s*([\d.]+)\s*(?:%|px)?\s*\)/g)]
+    .map((m) => ({ x: parseFloat(m[1]), y: parseFloat(m[2]) }));
+  if (pts.length < 3) return null;
+  const col = parseColor(b, "#39d353");
+  const solid = /实心|filled|solid/.test(b);
+  return {
+    type: "path",
+    data: { points: pts, fill: solid ? col : "none", stroke: col, pxMode: pts.some((p) => p.x > 100 || p.y > 100) },
+  };
 }
 
 /** 解析单行元素描述 → RenderElement（通用矢量语言：矩形/圆/椭圆/多边形/箭头/文本/K线） */
@@ -200,6 +301,21 @@ function parseElement(line: string): RenderElement | null {
   }
 
   // ==================== 兼容旧格式（半结构化） ====================
+  // 密集折线（点→线）
+  if (b && /折线|polyline/.test(b) && b.includes("(")) {
+    const el = parsePolyline(b);
+    if (el) return el;
+  }
+  // 面填充（线→面）
+  if (b && /面|face|polygon/.test(b) && b.includes("(") && (b.match(/\(/g) || []).length >= 3) {
+    const el = parseFace(b);
+    if (el) return el;
+  }
+  // 像素网格（点阵）
+  if (b && /点阵|像素|pixel|matrix/.test(b)) {
+    return { type: "pixels", data: { note: b } };
+  }
+
 
   // K线蜡烛：[K线蜡烛 | x=6%-94% | 24根 | 红#e0534b阳/绿#3fc47f阴]
   if (lower.includes("k线") || lower.includes("蜡烛") || lower.includes("kline")) {
@@ -303,6 +419,15 @@ function randSeeded(seed: number): () => number {
 export function renderSynesthesiaToSVG(synesthesia: string, width = 960): string {
   const lines = synesthesia.split("\n").map((l) => l.trim()).filter(Boolean);
 
+  // ════════ 像素级模式：存在 ASCII 点阵块 → 直接渲染为像素网格 ════════
+  const asciiMatrix = extractAsciiMatrix(synesthesia);
+  if (asciiMatrix) {
+    const matrix = asciiMatrixToPixels(asciiMatrix);
+    // 尺寸：默认 8px/格；可调 width 参数（整幅图目标宽）
+    const pixelSize = Math.max(1, Math.floor(width / matrix.width));
+    return pixelsToSVG(matrix, { pixelSize, bg: "#0d1117", fg: "#39d353" });
+  }
+
   // 画布解析
   let canvas: Canvas = { width, height: Math.round(width * 9 / 16), bgColor: "#1a1e2c" };
   for (const line of lines) {
@@ -383,11 +508,37 @@ export function renderSynesthesiaToSVG(synesthesia: string, width = 960): string
         parts.push(`<polygon points="${px(d.x1)},${py(d.y1)} ${hx - uy * 5},${hy + ux * 5} ${hx + uy * 5},${hy - ux * 5}" fill="${d.color}"/>`);
         break;
       }
+      case "polyline": {
+        const pts = d.points.map((pt: any) => `${d.pxMode ? pt.x : px(pt.x)},${d.pxMode ? pt.y : py(pt.y)}`).join(" ");
+        parts.push(`<polyline points="${pts}" fill="none" stroke="${d.color}" stroke-width="${d.width}"/>`);
+        break;
+      }
+      case "path": {
+        const pts = d.points.map((pt: any) => `${d.pxMode ? pt.x : px(pt.x)},${d.pxMode ? pt.y : py(pt.y)}`).join(" ");
+        parts.push(`<polygon points="${pts}" fill="${d.fill}" stroke="${d.stroke}" stroke-width="1.5"/>`);
+        break;
+      }
       case "text": {
         parts.push(`<text x="${px(d.x)}" y="${py(d.y)}" fill="${d.color}" font-size="${d.size}" font-weight="${d.bold ? 700 : 400}" font-family="monospace">${esc(d.text)}</text>`);
         break;
       }
     }
+  }
+
+  // 密集折线
+  for (const e of elements) {
+    if (e.type !== "polyline") continue;
+    const d = e.data;
+    const pts = d.points.map((pt: any) => `${d.pxMode ? pt.x : px(pt.x)},${d.pxMode ? pt.y : py(pt.y)}`).join(" ");
+    parts.push(`<polyline points="${pts}" fill="none" stroke="${d.color}" stroke-width="${d.width}"/>`);
+  }
+
+  // 面填充（密集闭合区域）
+  for (const e of elements) {
+    if (e.type !== "path") continue;
+    const d = e.data;
+    const pts = d.points.map((pt: any) => `${d.pxMode ? pt.x : px(pt.x)},${d.pxMode ? pt.y : py(pt.y)}`).join(" ");
+    parts.push(`<polygon points="${pts}" fill="${d.fill}" stroke="${d.stroke}" stroke-width="1.5"/>`);
   }
 
   // 折线
