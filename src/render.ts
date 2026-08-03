@@ -1359,3 +1359,116 @@ export function pixelGridToSVG(grid: PixelGrid, opts: { scale?: number; title?: 
 ${defs.join("\n")}
 ${parts.slice(1).join("\n")}` : "";
 }
+
+
+// ==================== RGB 网格双线性插值放大 ====================
+
+/**
+ * RGB 网格（parseRGBMatrix 输出）→ 双线性插值放大
+ * 把低分辨率色块网格平滑放大成高清图（消除马赛克边界）
+ * 返回 HTML（canvas 渲染，零依赖）或 SVG
+ */
+export function rgbGridUpscale(
+  matrix: { width: number; height: number; cells: { x: number; y: number; r: number; g: number; b: number }[] },
+  opts: { scale?: number; title?: string } = {},
+): string {
+  const scale = opts.scale ?? 10;
+  const W = matrix.width, H = matrix.height;
+  const outW = W * scale, outH = H * scale;
+  const title = opts.title ?? "mm-vision RGB 网格插值放大";
+
+  // 构建网格查找表
+  const grid: number[][][] = Array.from({ length: H }, () => Array.from({ length: W }, () => [0, 0, 0]));
+  for (const c of matrix.cells) {
+    if (c.y < H && c.x < W) grid[c.y][c.x] = [c.r, c.g, c.b];
+  }
+  // 空洞填充（邻居平均）
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const v = grid[y][x];
+      if (v[0] === 0 && v[1] === 0 && v[2] === 0) {
+        const neighbors: number[][] = [];
+        for (const [dy, dx] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const ny = y + dy, nx = x + dx;
+          if (ny >= 0 && ny < H && nx >= 0 && nx < W) {
+            const nv = grid[ny][nx];
+            if (!(nv[0] === 0 && nv[1] === 0 && nv[2] === 0)) neighbors.push(nv);
+          }
+        }
+        if (neighbors.length > 0) {
+          grid[y][x] = [
+            Math.round(neighbors.reduce((s, n) => s + n[0], 0) / neighbors.length),
+            Math.round(neighbors.reduce((s, n) => s + n[1], 0) / neighbors.length),
+            Math.round(neighbors.reduce((s, n) => s + n[2], 0) / neighbors.length),
+          ];
+        }
+      }
+    }
+  }
+
+  // 生成输出像素（双线性插值）
+  const px: number[] = new Array(outW * outH * 3);
+  const get = (gx: number, gy: number): [number, number, number] => {
+    const x = Math.max(0, Math.min(W - 1, gx));
+    const y = Math.max(0, Math.min(H - 1, gy));
+    return grid[y][x] as [number, number, number];
+  };
+  for (let py = 0; py < outH; py++) {
+    for (let pxx = 0; pxx < outW; pxx++) {
+      const gx = (pxx + 0.5) / scale - 0.5;
+      const gy = (py + 0.5) / scale - 0.5;
+      const x0 = Math.floor(gx), y0 = Math.floor(gy);
+      const fx = gx - x0, fy = gy - y0;
+      const c00 = get(x0, y0), c10 = get(x0 + 1, y0), c01 = get(x0, y0 + 1), c11 = get(x0 + 1, y0 + 1);
+      const i = (py * outW + pxx) * 3;
+      px[i] = Math.round((c00[0] * (1 - fx) + c10[0] * fx) * (1 - fy) + (c01[0] * (1 - fx) + c11[0] * fx) * fy);
+      px[i + 1] = Math.round((c00[1] * (1 - fx) + c10[1] * fx) * (1 - fy) + (c01[1] * (1 - fx) + c11[1] * fx) * fy);
+      px[i + 2] = Math.round((c00[2] * (1 - fx) + c10[2] * fx) * (1 - fy) + (c01[2] * (1 - fx) + c11[2] * fx) * fy);
+    }
+  }
+
+  // 打包成 HTML（canvas）
+  const data = JSON.stringify(Array.from({ length: outW * outH }, (_, i) => [i % outW, Math.floor(i / outW), px[i * 3], px[i * 3 + 1], px[i * 3 + 2]]));
+  return `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>${title}</title>
+<style>
+  body { margin: 0; background: #111; display: flex; flex-direction: column; align-items: center; padding: 16px; font-family: monospace; }
+  canvas { display: block; border: 1px solid #333; }
+  .bar { color: #888; font-size: 12px; margin: 8px 0; }
+  button { background: #1d4ed8; color: #fff; border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+</style>
+</head>
+<body>
+  <div class="bar">${title} — ${W}×${H} 网格 → ${outW}×${outH} 双线性插值（点击保存 PNG）</div>
+  <canvas id="cv" width="${outW}" height="${outH}"></canvas>
+  <div class="bar"><button onclick="save()">💾 保存 PNG</button></div>
+<script>
+const W = ${outW}, H = ${outH};
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const img = ctx.createImageData(W, H);
+const cells = ${data};
+for (const [x, y, r, g, b] of cells) {
+  const i = (y * W + x) * 4;
+  img.data[i] = r; img.data[i + 1] = g; img.data[i + 2] = b; img.data[i + 3] = 255;
+}
+ctx.putImageData(img, 0, 0);
+function save() {
+  const out = document.createElement("canvas");
+  out.width = W; out.height = H;
+  const octx = out.getContext("2d");
+  octx.putImageData(img, 0, 0);
+  out.toBlob(b => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b);
+    a.download = "mm-vision-upscale-${Date.now()}.png";
+    a.click();
+  });
+}
+</script>
+</body>
+</html>`;
+}

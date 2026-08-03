@@ -27,7 +27,7 @@ export interface VisionConfig {
   baseUrl: string;
   maxTokens: number;
   autoDetect: boolean;
-  mode: "brief" | "full" | "coords" | "auto";
+  mode: "brief" | "full" | "coords" | "auto" | "pixel";
   cacheTTL: number;   // 秒
   cacheMax: number;   // 条
   apiKey: string;
@@ -224,6 +224,9 @@ const MODE_TAIL: Record<string, string> = {
   full: "本次为完整模式：输出全部可识别元素。",
   coords: "本次为坐标优先模式：所有关键元素(曲线转折/标注/按钮/文字块)必须给出精确 (x%,y%) 坐标，这是最重要要求。",
   auto: "根据图片类型自适应：图表类侧重坐标与数值，自然图侧重构图与主体。",
+  pixel: "本次为像素级重建模式：把整张图片均匀划分为 40 列 x 30 行的网格（共 1200 格），逐格输出该格的平均主色。这是为重建原图服务的最高精度输出。\n"
+    + "输出格式（严格）：【色块网格】标记后，每行 40 个色块、共 30 行，每格格式 R,G,B（0-255 逗号分隔），格间空格分隔。\n"
+    + "要求：1) 每格颜色=该格覆盖区域的平均视觉主色，忠实原图（亮部亮、暗部暗、渐变换色）；2) 相邻格颜色必须平滑过渡（同区域内相邻格 RGB 差 ≤30），只有物体边界才允许跳变；3) 细小纹理（树叶/波纹/文字）取该格平均色；4) 全部 1200 格必须输出完整，不要省略、不要换行截断；5) 这是最重要要求：颜色必须与真实图片一致，这是别人据此重建图片的唯一依据。",
 };
 
 export function buildPrompt(userText: string, mode: string): string {
@@ -234,6 +237,8 @@ export function buildPrompt(userText: string, mode: string): string {
 
 export function resolveMode(cfg: VisionConfig, userText: string): string {
   if (cfg.mode !== "auto") return cfg.mode;
+  // auto：重建/像素关键词 → pixel
+  if (/像素|重建|还原|扫描|色块|pixel|render|reconstruct/i.test(userText)) return "pixel";
   // auto：图表/坐标类关键词 → coords
   return /k线|K线|走势|图表|盘面|坐标|点位|曲线|分时|蜡烛|指标|截图|chart|kline|graph|plot/i.test(userText) ? "coords" : "full";
 }
@@ -354,7 +359,9 @@ async function visionEncode(
 
 function maxTokensFor(mode: string, cfg: VisionConfig): number {
   if (cfg.maxTokens) return cfg.maxTokens;
-  return mode === "brief" ? 512 : 2048;
+  if (mode === "brief") return 512;
+  if (mode === "pixel") return 8192;
+  return 2048;
 }
 
 /**

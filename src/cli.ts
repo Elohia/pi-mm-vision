@@ -16,7 +16,7 @@
  *   mm-vision analyze F:/charts/kline.png coords "只输出坐标"
  */
 import { analyzeImage, loadConfig, cacheStats, configCandidates, packageRoot } from "./core.js";
-import { renderSynesthesiaToSVG, renderSynesthesiaToSVGFile, extractAsciiMatrix, asciiMatrixToPixels, pixelsToSVG, pixelsToHTML, rgbToHTML, parseRGBMatrix, parseRGBChannels, parseTiledMatrix, tiledToSVG, parsePixelGrid, pixelGridToHTML, pixelGridToSVG } from "./render.js";
+import { renderSynesthesiaToSVG, renderSynesthesiaToSVGFile, extractAsciiMatrix, asciiMatrixToPixels, pixelsToSVG, pixelsToHTML, rgbToHTML, parseRGBMatrix, parseRGBChannels, parseTiledMatrix, tiledToSVG, parsePixelGrid, pixelGridToHTML, pixelGridToSVG, rgbGridUpscale } from "./render.js";
 import * as fs from "fs";
 import * as path from "path";
 import { drawImage } from "./draw.js";
@@ -161,20 +161,65 @@ async function main() {
       return;
     }
 
+    case "reconstruct": {
+      // 图片 → pixel 编码 → 插值放大重建（与原图对比）
+      const image = args[1];
+      if (!image) {
+        console.error("用法: mm-vision reconstruct <图片> [-o out.html] [--scale 10]");
+        process.exit(2);
+      }
+      let outPath = "reconstruct.html";
+      let scale = 10;
+      const rest = args.slice(2);
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === "-o" && rest[i + 1]) outPath = rest[i + 1];
+        if (rest[i] === "--scale" && rest[i + 1]) scale = parseInt(rest[i + 1]);
+      }
+      // 1. pixel 模式编码
+      const cfg = loadConfig();
+      const result = await analyzeImage(image, { prompt: "像素级重建", mode: "pixel" }, cfg);
+      if (!result.ok) {
+        console.error(`❌ 编码失败: ${result.text.slice(0, 200)}`);
+        process.exit(1);
+      }
+      console.log(`📋 pixel 编码完成 (${result.text.length} 字符)`);
+      // 2. 提取 RGB 网格
+      const rgb = parseRGBMatrix(result.text);
+      if (!rgb) {
+        console.error("❌ 无法从输出提取 RGB 网格，原始输出前 300 字符:\n" + result.text.slice(0, 300));
+        process.exit(1);
+      }
+      console.log(`📐 RGB 网格: ${rgb.width}x${rgb.height} = ${rgb.cells.length} 格`);
+      // 3. 插值放大 → HTML
+      const html = rgbGridUpscale(rgb, { scale, title: "mm-vision 重建" });
+      fs.writeFileSync(outPath, html, "utf-8");
+      console.log(`✅ 重建完成: ${path.resolve(outPath)} (${rgb.width}x${rgb.height} → ${rgb.width * scale}x${rgb.height * scale})`);
+      return;
+    }
+
     case "draw": {
-      // 文字 → 图片：纯文字 LLM 直接生成（PIL 代码 或 通感描述）
+      // 文字 → 图片：纯文字 LLM 直接生成（点阵/代码/通感）
       const prompt = args.slice(1).join(" ");
       if (!prompt) {
-        console.error("用法: mm-vision draw \"描述图片内容\" [-o out.png] [--ref 参考编码文件]");
-        console.error("示例: mm-vision draw \"画一张雪山湖景：金色雪山倒映在蓝色湖面\"");
+        console.error("用法: mm-vision draw \"描述图片内容\" [-o out.png] [--ref 参考编码文件] [--tiled] [--grid 3x2]");
+        console.error("示例: mm-vision draw \"画一张雪山湖景\" --tiled --grid 2x2");
         process.exit(2);
       }
       let outPath = "mm-draw.png";
       let refPath: string | undefined;
+      let tiled = false;
+      let gridCols = 2, gridRows = 2;
       const rest = args.slice(1);
       for (let i = 0; i < rest.length; i++) {
         if (rest[i] === "-o" && rest[i + 1]) { outPath = rest[i + 1]; rest.splice(i, 2); i--; }
         if (rest[i] === "--ref" && rest[i + 1]) { refPath = rest[i + 1]; rest.splice(i, 2); i--; }
+        if (rest[i] === "--tiled") { tiled = true; rest.splice(i, 1); i--; }
+        if (rest[i] === "--grid" && rest[i + 1]) {
+          tiled = true;
+          const [gc, gr] = rest[i + 1].split("x").map((n) => parseInt(n.trim()));
+          if (gc && gr) { gridCols = gc; gridRows = gr; }
+          rest.splice(i, 2); i--;
+        }
       }
       const realPrompt = rest.join(" ");
       let referenceEncoding: string | undefined;
@@ -183,7 +228,7 @@ async function main() {
         console.log(`📐 参考锚点已加载: ${refPath} (${referenceEncoding.length} 字符)`);
       }
       console.log(`🎨 文字绘图: "${realPrompt}" → ${outPath}`);
-      const result = await drawImage(realPrompt, { outPath, referenceEncoding });
+      const result = await drawImage(realPrompt, { outPath, referenceEncoding, tiled, grid: tiled ? { cols: gridCols, rows: gridRows } : undefined });
       if (result.ok) {
         console.log(`✅ 图片已生成: ${path.resolve(result.imagePath)} (通道: ${result.mode})`);
         if (result.text) console.log(result.text);

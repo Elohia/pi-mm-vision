@@ -80,22 +80,39 @@ export function encodePNG(width: number, height: number, pixels: Uint8Array): Bu
 /** RGB 网格（行数组，每行 "R,G,B R,G,B..."）→ PNG 文件 */
 export function gridToPNG(rows: string[], outPath: string): { width: number; height: number } {
   const parsed: number[][] = rows.map((r) => {
-    return r.split(/\s+/).filter(Boolean).map((p) => {
-      const m = p.match(/^(\d{1,3}),(\d{1,3}),(\d{1,3})$/);
-      if (!m) return null;
-      return [Math.min(255, parseInt(m[1])), Math.min(255, parseInt(m[2])), Math.min(255, parseInt(m[3]))];
-    }).filter((v): v is number[] => !!v).flat();
-  }).filter((r) => r.length > 0);
+    const tokens = r.trim().split(/\s+/).filter(Boolean);
+    // 支持两种格式：
+    //   A) "R,G,B R,G,B ..."（逗号分隔三元组）
+    //   B) "R G B R G B ..."（空格分隔三元组）
+    if (tokens.length > 0 && tokens[0].includes(",")) {
+      return tokens.map((p) => {
+        const m = p.match(/^(\d{1,3}),(\d{1,3}),(\d{1,3})$/);
+        if (!m) return null;
+        return [Math.min(255, parseInt(m[1])), Math.min(255, parseInt(m[2])), Math.min(255, parseInt(m[3]))];
+      }).filter((v): v is number[] => !!v).flat();
+    }
+    // 空格分隔：按 3 个一组
+    const nums = tokens.map((t) => parseInt(t)).filter((n) => !isNaN(n) && n >= 0 && n <= 255);
+    const out: number[] = [];
+    for (let i = 0; i + 2 < nums.length || i < nums.length; i += 3) {
+      if (i + 2 < nums.length) out.push(nums[i], nums[i + 1], nums[i + 2]);
+    }
+    return out;
+  }).filter((r) => r.length >= 3);
+  if (parsed.length === 0) throw new Error("网格为空");
+  // 宽度补齐：所有行统一到最长行（不足补 0,0,0 黑色，超宽截断）
+  const maxCells = Math.max(...parsed.map((r) => r.length / 3));
+  const width = Math.floor(maxCells);
   const height = parsed.length;
-  const width = parsed[0]?.length ? parsed[0].length / 3 : 0;
-  if (width === 0 || height === 0) throw new Error("网格为空");
   const pixels = new Uint8Array(width * height * 3);
   for (let y = 0; y < height; y++) {
     const row = parsed[y];
     for (let x = 0; x < width; x++) {
-      pixels[(y * width + x) * 3] = row[x * 3];
-      pixels[(y * width + x) * 3 + 1] = row[x * 3 + 1];
-      pixels[(y * width + x) * 3 + 2] = row[x * 3 + 2];
+      if (x * 3 + 2 < row.length) {
+        pixels[(y * width + x) * 3] = row[x * 3];
+        pixels[(y * width + x) * 3 + 1] = row[x * 3 + 1];
+        pixels[(y * width + x) * 3 + 2] = row[x * 3 + 2];
+      }
     }
   }
   const png = encodePNG(width, height, pixels);
@@ -139,9 +156,8 @@ function parseJsonLoose(text: string): any {
   if (fence) t = fence[1].trim();
   try { return JSON.parse(t); } catch { /* fallthrough */ }
 
-  // 修复 LLM 常见的未转义 ASCII 引号：将值内 "中文" 替换为 "中文"
+  // 修复 LLM 常见的未转义 ASCII 引号
   const repaired = t
-    // 只修 description/code 字段值中的裸引号（内容里的 "xxx" 模式）
     .replace(/([：:\s])\"([^\"]{1,30})\"(?=[,}])/g, '$1\\"$2\\"');
   try { return JSON.parse(repaired); } catch { /* fallthrough */ }
 
@@ -149,18 +165,23 @@ function parseJsonLoose(text: string): any {
   const end = t.lastIndexOf("}");
   if (start >= 0 && end > start) {
     try { return JSON.parse(t.slice(start, end + 1)); } catch { /* fallthrough */ }
-    // 截断恢复：JSON 尾部不完整时，尝试补全 ]}" 
+  }
+  // 截断恢复：JSON 尾部不完整（无右括号）时，提取完整行补全 ]}
+  if (start >= 0) {
     try {
-      const partial = t.slice(start, end + 1);
-      const repaired = partial.replace(/\[\s*$/, '[]').replace(/([^\[\]\{\},:])\s*$/, '$1]}');
-      // 简单策略：找到最后一个完整行后补 ]
-      const m = partial.match(/^(.*"rows":\s*\[.*?)(?:\n|$)/s);
-      if (m) {
-        const rowsPart = m[1];
-        // 数完整行：每行以 "R,G,B...", 结尾
-        const rows = rowsPart.match(/"([\d,\s]+)"/g) || [];
-        if (rows.length > 0) {
-          const rebuilt = `{"mode":"scan","rows":[${rows.join(",")}]}`;
+      const tailEnd = end > start ? end + 1 : t.length;
+      const partial = t.slice(start, tailEnd);
+      const rowStrs = partial.match(/"([\d,\s]{20,})"/g) || [];
+      if (rowStrs.length > 0) {
+        const validRows: string[] = [];
+        for (const rs of rowStrs) {
+          const inner = rs.slice(1, -1).trim();
+          const points = inner.split(/\s+/).filter(Boolean);
+          const ok = points.length >= 5 && points.every((p) => /^\d{1,3},\d{1,3},\d{1,3}$/.test(p));
+          if (ok) validRows.push(inner);
+        }
+        if (validRows.length >= 5) {
+          const rebuilt = `{"mode":"scan","rows":[${validRows.map((r) => `"${r}"`).join(",")}]}`;
           return JSON.parse(rebuilt);
         }
       }
@@ -199,35 +220,134 @@ function runPILScript(code: string, outPath: string): Promise<string> {
 
 // ==================== 生成 Prompt ====================
 
-const DRAW_PROMPT = (userPrompt: string, referenceEncoding?: string) => `你是"文字绘图引擎"。根据用户描述，生成一张图片的实现方案。
+const DRAW_PROMPT = (userPrompt: string, referenceEncoding?: string) => `你是"点阵绘图引擎"。用户描述一张图片，你**逐行扫描输出每个像素的颜色**，由渲染器画出来。你不需要写代码、不需要画图——只需要用常识判断"图片的每个位置应该是什么颜色"。
 
 用户需求：${userPrompt}
-${referenceEncoding ? `\n【参考通感编码】（可选，提供空间结构锚点）：\n${referenceEncoding}` : ""}
+${referenceEncoding ? `\n【参考通感编码】（可选，提供空间布局锚点）：\n${referenceEncoding}` : ""}
 
-输出严格 JSON（不要 markdown 围栏，不要多余文字）。三种通道任选其一，**通用优先 pil**：
-1. {"mode": "pil", "code": "完整 Python PIL 脚本"}
-2. {"mode": "scan", "rows": ["R,G,B R,G,B ...", "..."]}
-3. {"mode": "sync", "description": "通感描述"}
+输出严格 JSON（不要 markdown 围栏，不要多余文字），唯一格式：
+{"mode": "scan", "rows": ["R,G,B R,G,B R,G,B ...", "R,G,B ...", "..."]}
 
-通道选择规则：
-- **默认选 pil**：PIL 代码是最通用的——任何场景（城市街景、电路图、抽象图案、人物、动物、图表）都能用代码画出来，token 效率最高，不会截断。写完整自包含脚本：from PIL import Image, ImageDraw, ImageFont；用 img = Image.new() 创建；渐变用逐像素或 ImageDraw；脚本末尾 img.save("out.png")。
-- 只有当你觉得代码写不出来（需要照片级真实感、大量随机纹理）时才选 scan。
-- sync 用于界面/图表/几何示意图。
-
-mode=scan 规则（点阵扫描）：
-- 分辨率自适应：复杂场景 40x30（1200点），简单场景 32x24
-- rows 每行 "R,G,B" 空格分隔，共 height 行
-- 用常识上色：天空蓝渐变在上、山体灰褐带雪白顶、湖水青蓝有倒影、草地绿、城市楼宇灰蓝带窗光
-- 相邻点平滑过渡；有参考编码时严格按编码空间布局
+扫描规则：
+1. **分辨率 40x30**：rows 恰好 30 行，每行恰好 40 个 "R,G,B"（0-255），空格分隔。共 1200 个点。
+2. **坐标映射**：行 0 是图片顶部，行 29 是底部；列 0 是左侧，列 39 是右侧。
+3. **用常识上色**（关键）：
+   - 天空在上部（行 0-10）：蓝色渐变，日出/日落时靠近太阳处暖黄/橙粉
+   - 山在中间：山顶白/雪（带淡蓝阴影），山体灰褐/岩石色，受光面偏暖
+   - 水面：蓝绿色，山峰倒影区域泛金/橙，波纹处明暗交替
+   - 草地/树在下方：绿色系（深绿树、翠绿草）
+   - 城市：灰色楼群+黄色窗光；夜晚深蓝背景+黄色亮点
+   - 人物：肤色脸部、发色、衣服颜色
+   - 抽象图形：按描述用对应颜色
+4. **平滑过渡**：相邻点颜色要渐变（差不超过 40），只有物体边界才允许跳变。同一物体内部有明暗变化（光从一侧来）。
+5. **全部 1200 点必须输出完整**，不要省略任何行或列。
 
 只输出 JSON`;
+
+
+// ==================== 分块矩阵生成 ====================
+
+const TILE_PROMPT = (userPrompt: string, blockIndex: number, totalBlocks: number, blockX: number, blockY: number, gridCols: number, gridRows: number) =>
+  `你是"点阵绘图引擎"。整张图片被分成 ${gridCols}x${gridRows} 的网格，你现在绘制第 ${blockX + 1} 列第 ${blockY + 1} 行的一块（块 ${blockIndex + 1}/${totalBlocks}）。你不需要写代码，只需要逐点输出颜色。
+
+整图需求：${userPrompt}
+
+【本块位置】列 ${blockX + 1}/${gridCols}，行 ${blockY + 1}/${gridRows}（左上为 1,1；右下为 ${gridCols},${gridRows}）
+【本块尺寸】30 列 x 20 行 = 600 个点
+
+输出严格 JSON（不要围栏不要多余文字）：
+{"rows": ["R,G,B R,G,B ...", "..."]}
+
+规则：
+1. rows **必须恰好 20 行**，每行**恰好 30 个色点**；**每个色点必须写成 "R,G,B" 逗号分隔**（如 255,214,170），点与点之间用空格分隔；禁止写成 "255 214 170" 空格三元组形式。**30 行 40 列一行都不能少**，宁可重复上一行的颜色也不许省略。
+2. 用常识判断本块属于整图的哪个区域并上色：
+   - 行 0-7 通常是天空（蓝/渐变），除非本块行号靠下
+   - 根据块位置与整图布局对应：例如 3x2 网格中，块(1,2)=左下角可能是草地/地面，块(3,1)=右上角是天空/远景
+   - 主体物体（山/建筑/人物）横跨多块时，相邻块边缘颜色要衔接（同一物体在块边界两侧颜色相近）
+3. 颜色要平滑渐变，有明暗层次（模拟光照），不要平涂纯色；**同一块内部不同区域（如天空到山）也要渐变过渡**
+4. 全部 600 点完整输出
+
+只输出 JSON`;
+
+/** 分块生成：逐块请求 LLM，最后拼装成完整图片 */
+export async function drawImageTiled(
+  userPrompt: string,
+  opts: {
+    outPath?: string;
+    grid?: { cols: number; rows: number };
+    llmConfig?: Partial<LLMConfig>;
+    signal?: AbortSignal;
+  } = {},
+): Promise<DrawResult> {
+  const outPath = opts.outPath || path.resolve("mm-draw-tiled.png");
+  const cols = opts.grid?.cols ?? 2;
+  const rows = opts.grid?.rows ?? 2;
+  const TILE_W = 30, TILE_H = 20;  // 30x20=600点，deepseek 输出上限内完整
+
+  const vcfg = loadConfig();
+  const llm: LLMConfig = {
+    model: process.env.MM_DRAW_MODEL || vcfg.model,
+    baseUrl: vcfg.baseUrl,
+    apiKey: vcfg.apiKey,
+    maxTokens: 8192,
+    ...opts.llmConfig,
+  };
+  if (!llm.apiKey) {
+    return { ok: false, mode: "tiles", imagePath: outPath, error: "未找到 API key" };
+  }
+
+  const total = cols * rows;
+  const allRows: string[] = [];  // 每块 30 行，按块顺序收集
+  const tileRowData: string[][][] = []; // [blockY][blockX] = rows[]
+
+  for (let by = 0; by < rows; by++) {
+    const rowBlocks: string[][] = [];
+    for (let bx = 0; bx < cols; bx++) {
+      const idx = by * cols + bx;
+      const prompt = TILE_PROMPT(userPrompt, idx, total, bx, by, cols, rows);
+      const raw = await llmText(prompt, llm, opts.signal);
+      const plan = parseJsonLoose(raw);
+      if (!plan || !Array.isArray(plan.rows)) {
+        return { ok: false, mode: "tiles", imagePath: outPath, error: `块 ${idx} 输出无法解析: ${raw.slice(0, 150)}` };
+      }
+      const tileRows = plan.rows.filter((r: string) => typeof r === "string" && r.trim());
+      console.log(`  [块 ${idx} ${bx + 1}x${by + 1}] 行数: ${tileRows.length}, 首行点数: ${(tileRows[0] || "").trim().split(/\s+/).filter(Boolean).length}`);
+      rowBlocks.push(tileRows);
+    }
+    tileRowData.push(rowBlocks);
+  }
+
+  // 拼装：全图 = rows*30 行 × cols*40 列
+  const fullRows: string[] = [];
+  for (let by = 0; by < rows; by++) {
+    for (let ly = 0; ly < TILE_H; ly++) {
+      const lineParts: string[] = [];
+      for (let bx = 0; bx < cols; bx++) {
+        const tileRows = tileRowData[by][bx];
+        if (ly < tileRows.length) lineParts.push(tileRows[ly].trim());
+      }
+      fullRows.push(lineParts.join(" "));
+    }
+  }
+
+  try {
+    const { width, height } = gridToPNG(fullRows, outPath);
+    return { ok: true, mode: "tiles", imagePath: outPath, text: `分块矩阵 → PNG (${width}x${height}, ${cols}x${rows} 块)` };
+  } catch (e: any) {
+    return { ok: false, mode: "tiles", imagePath: outPath, error: String(e?.message || e) };
+  }
+}
 
 // ==================== 主入口 ====================
 
 export async function drawImage(
   userPrompt: string,
-  opts: { outPath?: string; llmConfig?: Partial<LLMConfig>; width?: number; signal?: AbortSignal; referenceEncoding?: string } = {},
+  opts: { outPath?: string; llmConfig?: Partial<LLMConfig>; width?: number; signal?: AbortSignal; referenceEncoding?: string; tiled?: boolean; grid?: { cols: number; rows: number } } = {},
 ): Promise<DrawResult> {
+  // 分块高清模式：tiled=true 或 prompt 含"高清/分块/大图"关键词
+  if (opts.tiled || /高清|分块|大图|高分辨率|tiled|hi-res/i.test(userPrompt)) {
+    return drawImageTiled(userPrompt, { outPath: opts.outPath, llmConfig: opts.llmConfig, signal: opts.signal, grid: opts.grid });
+  }
   const outPath = opts.outPath || path.resolve("mm-draw.png");
   // LLM 配置：优先 draw 专用环境变量，否则复用 mm-vision 视觉配置（同 baseUrl/key，不同模型）
   const vcfg = loadConfig();
@@ -235,7 +355,7 @@ export async function drawImage(
     model: process.env.MM_DRAW_MODEL || vcfg.model,
     baseUrl: vcfg.baseUrl,
     apiKey: vcfg.apiKey,
-    maxTokens: 12000,
+    maxTokens: 8192,
     ...opts.llmConfig,
   };
   if (!llm.apiKey) {
