@@ -56,12 +56,19 @@ async function llmText(prompt: string, cfg: LLMConfig, signal?: AbortSignal): Pr
   return data?.choices?.[0]?.message?.content || "";
 }
 
-/** 容错 JSON 解析（剥离 markdown 围栏，截取 {} 区间） */
+/** 容错 JSON 解析（剥离 markdown 围栏，截取 {} 区间，修复未转义引号） */
 function parseJsonLoose(text: string): any {
   let t = text.trim();
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   if (fence) t = fence[1].trim();
   try { return JSON.parse(t); } catch { /* fallthrough */ }
+
+  // 修复 LLM 常见的未转义 ASCII 引号：将值内 "中文" 替换为 "中文"
+  const repaired = t
+    // 只修 description/code 字段值中的裸引号（内容里的 "xxx" 模式）
+    .replace(/([：:\s])\"([^\"]{1,30})\"(?=[,}])/g, '$1\\"$2\\"');
+  try { return JSON.parse(repaired); } catch { /* fallthrough */ }
+
   const start = t.indexOf("{");
   const end = t.lastIndexOf("}");
   if (start >= 0 && end > start) {
@@ -181,10 +188,20 @@ export async function drawImage(
   if (plan.mode === "sync" && typeof plan.description === "string") {
     try {
       const svg = renderSynesthesiaToSVG(plan.description, opts.width ?? 960);
-      // 保存 SVG 并尝试转 PNG（用 svg2png.py）
       const svgPath = outPath.replace(/\.png$/, ".svg");
       fs.writeFileSync(svgPath, svg, "utf-8");
-      return { ok: true, mode: "sync", imagePath: svgPath, text: "通感描述已渲染为 SVG（用 scripts/svg2png.py 转 PNG）" };
+      // 尝试转 PNG（svg2png.py 随包分发）
+      const script = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "scripts", "svg2png.py");
+      try {
+        await new Promise<void>((resolve, reject) => {
+          execFile("python", [script, svgPath, outPath, String(opts.width ?? 960)], {
+            windowsHide: true, timeout: 30000,
+          }, (err) => err ? reject(err) : resolve());
+        });
+        return { ok: true, mode: "sync", imagePath: outPath, text: `通感描述 → SVG → PNG（${svg.length} bytes SVG）` };
+      } catch {
+        return { ok: true, mode: "sync", imagePath: svgPath, text: "通感描述已渲染为 SVG（svg2png.py 未找到，可用浏览器打开 SVG）" };
+      }
     } catch (e: any) {
       return { ok: false, mode: "sync", imagePath: outPath, error: String(e?.message || e) };
     }
