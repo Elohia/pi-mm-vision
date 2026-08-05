@@ -1,6 +1,6 @@
 {
   "name": "mm-vision",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "description": "Synesthesia Encoder (通感编码器) — give any text-only LLM the ability to see images via structured spatial text encoding. Works with Pi / Codex / Claude Code / any MCP host.",
   "type": "module",
   "bin": {
@@ -35,9 +35,14 @@
     "chart",
     "deepseek",
     "pi-agent",
+    "pi-package",
     "codex",
     "claude-code"
   ],
+  "pi": {
+    "extensions": ["./src/pi-extension.ts"],
+    "image": "https://raw.githubusercontent.com/Elohia/pi-mm-vision/main/examples/mountain.svg"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=18"

@@ -33,6 +33,18 @@
 
 ## 🚀 安装（3 分钟）
 
+### 方式 0：Pi 原生扩展包（推荐 · 含自动更新提示）
+
+```bash
+pi install git:github.com/Elohia/pi-mm-vision@v2.2.0
+```
+
+- 安装后 `mm_vision` 工具 / 粘贴图片自动分析 / `/vision` 命令立即可用
+- **自动更新**：Pi 启动时自动对比远端 commit，发现新版本会在界面提示
+  `Package updates are available. Run pi update --extensions`，一条命令升级
+- 升级：`pi update --extensions`（全部包）或 `pi install git:github.com/Elohia/pi-mm-vision@新版本`（单包）
+- 卸载：`pi remove git:github.com/Elohia/pi-mm-vision`
+
 ### 方式 A：一键脚本（推荐）
 
 ```bash
