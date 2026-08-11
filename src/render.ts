@@ -18,7 +18,12 @@
  *   【水平线】y=42% | 标注 "SUPPORT 275"
  *   【最高点/标注】位于 (x%,y%) | 数值
  *   【K线】x=4%-96% | N根 | 红#xxxxxx阳/绿#xxxxxx阴
+ *   【函数曲线】y=sin(x)*x/10 | x:5%-95% | 颜色 | 宽度   （数学表达式采样绘制）
+ *   【参数曲线】x=16*sin(t)^3, y=13*cos(t)-5*cos(2*t) | t:0-2pi | 颜色 | 填充色（闭合→面）
+ *   【围合区域】y1=x^2, y2=x | x:0%-100% | 填充色   （两条曲线之间的面积）
  */
+
+import { compileExpr } from "./fnexpr.js";
 
 // ==================== 画布 ====================
 
@@ -63,9 +68,10 @@ function parseXY(s: string): { x: number; y: number } | null {
 
 interface RenderElement {
   type: "candles" | "line" | "hline" | "vline" | "marker" | "text" | "rect" | "grid" | "circle" | "ellipse" | "polygon" | "arrow" | "label"
-    | "pixels" | "polyline" | "path";
+    | "pixels" | "polyline" | "path" | "fcurve" | "fregion";
   data: any;
 }
+
 
 /** 解析 [类型 | 字段...] 方括号块 */
 function parseBracketBody(line: string): string | null {
@@ -656,9 +662,72 @@ function parseElement(line: string): RenderElement | null {
   if (b && /点阵|像素|pixel|matrix/.test(b)) {
     return { type: "pixels", data: { note: b } };
   }
+  // 围合区域：两条曲线之间的面积（线→面）
+  // 【围合区域】y1=x^2, y2=x | x:0%-100% | 填充色
+  if (lower.includes("围合") || lower.includes("区域") || lower.includes("面积")) {
+    const y1m = line.match(/y1\s*[:=]?\s*([^,|，]{1,80})/i);
+    const y2m = line.match(/y2\s*[:=]?\s*([^,|，]{1,80})/i);
+    const xr = line.match(/x\s*[:=]?\s*(-?[\d.]+)%?\s*[-至~]\s*(-?[\d.]+)%?/i);
+    const fill = parseColor(line, "#3fc47f");
+    if (y1m && y2m) {
+      try {
+        const f1 = compileExpr(y1m[1].trim());
+        const f2 = compileExpr(y2m[1].trim());
+        return {
+          type: "fregion",
+          data: { f1, f2, x0: xr ? parseFloat(xr[1]) : 0, x1: xr ? parseFloat(xr[2]) : 100, fill },
+        };
+      } catch { /* 表达式无法解析则跳过 */ }
+    }
+  }
 
+  // 函数曲线 / 参数曲线：数学表达式采样绘制
+  // 【函数曲线】y=sin(x)*x/10 | x:5%-95% | 颜色 | 宽度
+  // 【参数曲线】x=16*sin(t)^3, y=13*cos(t)-5*cos(2*t) | t:0-2pi | 颜色
+  if (lower.includes("函数曲线") || lower.includes("参数曲线") || lower.includes("f(x)") || /[=][\s]*[a-z]*(x|t)/.test(lower) && (lower.includes("函数") || lower.includes("曲线") || lower.includes("curve"))) {
+    const isParam = lower.includes("参数") || /x\s*[=]/.test(lower);
+    const yxm = line.match(/(?:y|x)\s*[=:]\s*([^|，]{1,120})/i);
+    const xrm = line.match(/(?:x|t)\s*[:=]\s*(-?[\d.]+(?:\s*[a-z]*)?)\s*[-至~]\s*(-?[\d.]+(?:\s*[a-z]*)?)/i);
+    const col = parseColor(line, "#5a8cff");
+    const width = /粗/.test(line) ? 4 : 2.5;
+    const fill = /填充/.test(line) ? parseColor(line) : "none";
+    if (yxm) {
+      try {
+        if (isParam) {
+          // 参数曲线：x=f(t), y=g(t)
+          const xt = line.match(/x\s*[=:]\s*([^,|，]{1,80})/i)?.[1]?.trim();
+          const yt = line.match(/y\s*[=:]\s*([^,|，]{1,80})/i)?.[1]?.trim();
+          if (xt && yt) {
+            const fx = compileExpr(xt);
+            const fy = compileExpr(yt);
+            return {
+              type: "fcurve",
+              data: {
+                kind: "param",
+                fx, fy,
+                t0: xrm ? parseFloat(xrm[1].replace(/[a-z]/g, "")) : 0,
+                t1: xrm ? parseFloat(xrm[2].replace(/[a-z]/g, "")) : 2 * Math.PI,
+                color: col, width, fill,
+              },
+            };
+          }
+        } else {
+          const fy = compileExpr(yxm[1].trim());
+          return {
+            type: "fcurve",
+            data: {
+              kind: "fn",
+              fy,
+              x0: xrm ? parseFloat(xrm[1]) : 0,
+              x1: xrm ? parseFloat(xrm[2]) : 100,
+              color: col, width, fill,
+            },
+          };
+        }
+      } catch { /* 表达式无法解析则跳过 */ }
+    }
+  }
 
-  // K线蜡烛：[K线蜡烛 | x=6%-94% | 24根 | 红#e0534b阳/绿#3fc47f阴]
   if (lower.includes("k线") || lower.includes("蜡烛") || lower.includes("kline")) {
     const xm = line.match(/x\s*=\s*(\d+(?:\.\d+)?)\s*%?\s*-\s*(\d+(?:\.\d+)?)\s*%?/);
     const nm = line.match(/(\d+)\s*根/);
@@ -873,12 +942,77 @@ export function renderSynesthesiaToSVG(synesthesia: string, width = 960): string
       }
       case "text": {
         parts.push(`<text x="${px(d.x)}" y="${py(d.y)}" fill="${d.color}" font-size="${d.size}" font-weight="${d.bold ? 700 : 400}" font-family="monospace">${esc(d.text)}</text>`);
-        break;
+    }
+  }
+}
+
+  // 函数曲线 / 参数曲线 / 围合区域（数学表达式采样 → 线/面）
+  const SAMPLE = 240;
+  // 自动归一化：原始数学坐标 → 画布 5%-95%（保纵横比）
+  const norm = (raw: { x: number; y: number }[]): { x: number; y: number }[] => {
+    if (raw.length < 2) return raw;
+    const xs = raw.map((p) => p.x), ys = raw.map((p) => p.y);
+    const xMin = Math.min(...xs), xMax = Math.max(...xs);
+    const yMin = Math.min(...ys), yMax = Math.max(...ys);
+    const xSpan = xMax - xMin || 1, ySpan = yMax - yMin || 1;
+    // 保留纵横比：统一缩放因子
+    const s = Math.min(90 / xSpan, 90 / ySpan);
+    const xOff = 5 + (90 - xSpan * s) / 2;
+    const yOff = 5 + (90 - ySpan * s) / 2;
+    return raw.map((p) => ({ x: xOff + (p.x - xMin) * s, y: yOff + (p.y - yMin) * s }));
+  };
+  for (const e of elements) {
+    if (e.type === "fregion") {
+      const d = e.data;
+      const rawTop: { x: number; y: number }[] = [], rawBot: { x: number; y: number }[] = [];
+      for (let i = 0; i <= SAMPLE; i++) {
+        const t = i / SAMPLE;
+        const xv = d.x0 + (d.x1 - d.x0) * t;
+        let y1 = 50, y2 = 50;
+        try { y1 = d.f1(xv); } catch { }
+        try { y2 = d.f2(xv); } catch { }
+        rawTop.push({ x: xv, y: y1 });
+        rawBot.push({ x: xv, y: y2 });
       }
+      const top = norm(rawTop), bot = norm(rawBot);
+      const topS = top.map((p) => `${px(p.x)},${py(p.y)}`);
+      const botS = bot.map((p) => `${px(p.x)},${py(p.y)}`);
+      // 闭合面：上边界正序 + 下边界逆序
+      parts.push(`<polygon points="${topS.concat(botS.reverse()).join(" ")}" fill="${d.fill}" fill-opacity="0.35" stroke="${d.fill}" stroke-width="1.5"/>`);
+      parts.push(`<polyline points="${topS.join(" ")}" fill="none" stroke="${d.fill}" stroke-width="2.5"/>`);
+      parts.push(`<polyline points="${botS.join(" ")}" fill="none" stroke="${d.fill}" stroke-width="2.5"/>`);
+      continue;
+    }
+    if (e.type !== "fcurve") continue;
+    const d = e.data;
+    const raw: { x: number; y: number }[] = [];
+    if (d.kind === "fn") {
+      for (let i = 0; i <= SAMPLE; i++) {
+        const t = i / SAMPLE;
+        const xv = d.x0 + (d.x1 - d.x0) * t;
+        let yv = 50;
+        try { yv = d.fy(xv); } catch { }
+        raw.push({ x: xv, y: yv });
+      }
+    } else {
+      // 参数曲线：x=f(t), y=g(t)
+      for (let i = 0; i <= SAMPLE; i++) {
+        const t = d.t0 + (d.t1 - d.t0) * (i / SAMPLE);
+        let xv = 50, yv = 50;
+        try { xv = d.fx(t); yv = d.fy(t); } catch { }
+        raw.push({ x: xv, y: yv });
+      }
+    }
+    const pts = norm(raw).map((p) => `${px(p.x)},${py(p.y)}`);
+    if (d.fill !== "none") {
+      // 闭合参数曲线 → 面
+      parts.push(`<polygon points="${pts.join(" ")}" fill="${d.fill}" fill-opacity="0.35" stroke="${d.color}" stroke-width="2"/>`);
+    } else {
+      parts.push(`<polyline points="${pts.join(" ")}" fill="none" stroke="${d.color}" stroke-width="${d.width}"/>`);
     }
   }
 
-  // 密集折线
+
   for (const e of elements) {
     if (e.type !== "polyline") continue;
     const d = e.data;
@@ -1472,3 +1606,4 @@ function save() {
 </body>
 </html>`;
 }
+
