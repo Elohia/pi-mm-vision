@@ -949,11 +949,16 @@ export function renderSynesthesiaToSVG(synesthesia: string, width = 960): string
   // 函数曲线 / 参数曲线 / 围合区域（数学表达式采样 → 线/面）
   const SAMPLE = 240;
   // 自动归一化：原始数学坐标 → 画布 5%-95%（保纵横比）
+  // 若坐标本身就在百分比范围（0-100）内则跳过归一化（LLM 直接给百分比坐标）
   const norm = (raw: { x: number; y: number }[]): { x: number; y: number }[] => {
     if (raw.length < 2) return raw;
     const xs = raw.map((p) => p.x), ys = raw.map((p) => p.y);
     const xMin = Math.min(...xs), xMax = Math.max(...xs);
     const yMin = Math.min(...ys), yMax = Math.max(...ys);
+    // 百分比坐标（全部在 -10..110 内）→ 直接用
+    if (xMin >= -10 && xMax <= 110 && yMin >= -10 && yMax <= 110) {
+      return raw;
+    }
     const xSpan = xMax - xMin || 1, ySpan = yMax - yMin || 1;
     // 保留纵横比：统一缩放因子
     const s = Math.min(90 / xSpan, 90 / ySpan);
