@@ -26,14 +26,23 @@
 - ⚡ **4 种模式**：`brief`（快/省 512 tokens）/ `full`（标准）/ `coords`（坐标优先，图表盘面专用）/ `auto`（关键词自动识别）
 - 🧠 **缓存**：TTL 内重复分析秒回（默认 600s / 100 条）
 - 🔌 **零硬编码**：模型 / baseUrl / API key / 配置路径全可配置；兼容任意 OpenAI 兼容视觉模型（qwen-vl / gpt-4o / glm-4v / kimi-vl / MiniMax-VL…）
-- 🖥️ **多宿主接入**：MCP（Claude Code / Codex / Pi / Cursor / opencode）+ CLI + Agent 扩展
+- 🖥️ **多宿主接入**：MCP（Claude Code / Codex / Pi / Cursor / opencode）+ [DSH 插件](https://www.npmjs.com/package/dsh-plugin-mm-vision) + CLI + Agent 扩展
 - 🎨 **双向协议（mcp_render）**：通感编码 → SVG 图片（矩形/圆/椭圆/多边形/箭头/文本/山体/湖面/任意元素），纯文本 LLM 获得**画图**能力
 - 🔬 **像素级渲染**：ASCII 点阵 / RGB三元组 / RGB三通道嵌套 → 像素网格，分块拼接（4×4=5万+像素），**文字→真彩色图片**
 - 🌐 **HTML 渲染器**：canvas putImageData 浏览器直接出图（零依赖、可缩放、一键保存 PNG）
 
 ## 🚀 安装（3 分钟）
 
-### 方式 0：Pi 原生扩展包（推荐 · 含自动更新提示）
+### 方式 0：DeepSeek Harness 插件（DSH · `mm_vision` 模型工具）
+
+```bash
+dsh plugin --profile web add dsh-plugin-mm-vision   # 或从 GitHub 直装: dsh plugin add github:Elohia/dsh-plugin-mm-vision
+```
+
+- 安装后 DSH agent 自动获得 `mm_vision` 工具：对话中直接说"分析这张图 F:/xxx/kline.png"即可
+- 纯 JS 零依赖包（Node 内置 + fetch），无需构建；详见 [dsh-plugin-mm-vision](https://www.npmjs.com/package/dsh-plugin-mm-vision)
+
+### 方式 1：Pi 原生扩展包（推荐 · 含自动更新提示）
 
 ```bash
 pi install git:github.com/Elohia/pi-mm-vision@v2.2.0
