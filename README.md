@@ -154,6 +154,23 @@ mm-vision html lake.txt -o lake.html --scale 4    # 点阵/RGB → HTML 画布�
 支持元素：矩形 / 圆形 / 椭圆 / 多边形 / 箭头 / 文本 / 水平线 / 标注点 / K线蜡烛 / 网格 / **密集折线（点→线）** / **面填充（线→面）** / **像素网格（点阵→像素）**。
 已闭环验证：编码 → 渲染 → 再识别，坐标与元素完全一致。
 
+### 画图实测（examples/draw/）
+
+纯文字模型不靠扩散模型也能"画"出东西——以下是测试会话（2026-08-11）的真实产物：
+
+| 产物 | 方式 | 说明 |
+|------|------|------|
+| [`demo.svg`](examples/draw/demo.svg) | 函数图像 | 多个函数曲线（点→线→面）渲染：坐标轴 + 精确到 0.1px 的曲线 + 标注 |
+| [`butterfly.png`](examples/draw/butterfly.png) | 矩阵渲染 | 蝴蝶：参数化矩阵生成 + 零依赖 PNG 编码 |
+| [`pipeline-line.png`](examples/draw/pipeline-line.png) | 先画线 | 管线：线稿 → 矩阵渲染两阶段 |
+| [`pipeline-render.png`](examples/draw/pipeline-render.png) | 矩阵渲染 | 管线完整渲染 |
+| [`pipeline-svd-art.png`](examples/draw/pipeline-svd-art.png) | SVD 艺术化 | 奇异值分解风格化 |
+| [`vase-svd.png`](examples/draw/vase-svd.png) | SVD 渲染 | 花瓶：样本外生成（非脚本硬编码，参数化） |
+| [`snowman-svd.png`](examples/draw/snowman-svd.png) | SVD 渲染 | 雪人 |
+| [`gothic-girl.png`](examples/draw/gothic-girl.png) | PIL 通道 | 哥特婚纱少女：LLM 写 PIL 脚本 → 子进程执行 |
+
+> 通道说明：`pil`（LLM 写 Python PIL 脚本）`sync`（通感矢量 → SVG）`layout-tiles`（布局先行分块）`scan/tiles`（逐点 RGB 矩阵）`svd`（矩阵分解风格化）。诚实声明：文字模型画图**结构可用、细节抽象**——界面线框/图表/示意图是强项，自然图是"火柴人美学"。
+
 ## ⚠️ 诚实声明（先看这里）
 
 **mm-vision draw 画出来的图，丑。** 这不是谦虚，是物理规律：
